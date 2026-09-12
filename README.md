@@ -178,3 +178,20 @@ token sanitization across `PhimLocalServer`/`PhimWebView`; build number 216 → 
   exit codes still returned) and around `xcodebuild` (RC capture).
 - Tests: 326/326. xcodebuild/archive/IPA on a real runner: NOT VERIFIED
   from this sandbox — the next Actions run is the gate.
+
+## Nav gestures + PHIM black-screen fix 2026-09-12 (build 220 / 2.4.0)
+
+- Menu stays hidden by default (fullscreen); second reveal gesture added:
+  swipe in from the RIGHT screen edge (parallel to long-press). Menu can
+  no longer open invisibly under the player sheet.
+- Swipe in from the LEFT edge = Back exactly one step, in navigation
+  order: overlay menu -> player sheet -> webview history (canGoBack) ->
+  no-op at root (never quits the app).
+- PHIM black screen after tab switching: root cause = missing
+  `webViewWebContentProcessDidTerminate` (terminated WebContent process
+  leaves a permanently black WKWebView). Fixed with the official delegate
+  (reload ONLY on process death; localStorage cache survives) plus a
+  `setNeedsDisplay()` repaint on tab re-appear (no needless reload, state
+  preserved). Same lifecycle fix applied to TUBE's webview.
+- New gestures use cancelsTouchesInView=false / delaysTouchesBegan=false:
+  video controls, scrolling and web taps unaffected. Tests: 338/338.

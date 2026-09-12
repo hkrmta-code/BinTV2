@@ -391,3 +391,35 @@ Yêu cầu mới sau build 218: loại bỏ hoàn toàn thanh tab phía trên (B
 - Trích step Preflight THẬT từ yml đã sửa, chạy bằng đúng lời gọi GitHub `bash --noprofile --norc -eo pipefail` trên 3 trạng thái: (1) canonical+tombstone → **rc=0**, 4 file ci-skip in minh bạch, marker END đủ; (2) repo-user-hiện-tại (3 file chết bản đầy đủ) → **rc=1** + marker END exit=1 (fix set +e hiệu lực); (3) repo-user-sau-patch (tombstone đè lên) → **rc=0** → Preflight sẽ XANH, job đi tiếp tới xcodebuild.
 - YAML valid (15 steps); suite mock-E2E **326/326 PASS** (T4.1 dạy cơ chế ci-skip + whitelist chặt; T4.8 chấp nhận tombstone; T4.9 +mô phỏng trọn Preflight 2.1 trên canonical → missing=0).
 - `xcodebuild build/archive` + đóng gói IPA với mã nguồn 219 trên Xcode thật: **NOT VERIFIED** tại sandbox — lần chạy kế tiếp chính là cổng xác nhận; nếu có lỗi Swift, xbuild.log giờ ghi TOÀN BỘ output compiler kèm error dump.
+
+---
+
+## ADDENDUM 7 — RUN #26: job KHÔNG ĐƯỢC CẤP RUNNER (GitHub billing), không phải lỗi code
+
+**Hiện tượng (ảnh chụp run #26 "Update build-ipa.yml"):** annotation duy nhất — *"The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"*; job `Build IPA` không có step nào, không log nào → **chưa một dòng code nào chạy**. Commit patch đã lên repo thành công; GitHub chặn cấp runner ở tầng tài khoản.
+
+**Nguyên nhân:** runner macOS nhân phút Actions ×10; repo PRIVATE gói Free có ~2.000 phút Linux/tháng ≈ 200 phút macOS. Hết phút trong chu kỳ (hoặc thẻ thanh toán fail / spending limit $0) → job bị chặn đúng thông báo trên. Repo PUBLIC được miễn phí phút không giới hạn.
+
+**4 đường sửa (tùy tình huống, không đường nào đụng code app):**
+- A. Đổi repo sang **Public** (Settings → General → Danger Zone → Change visibility) → phút miễn phí vô hạn; cân nhắc vì mã nguồn sẽ công khai.
+- B. **Self-hosted runner** trên Mac cá nhân có Xcode (Settings → Actions → Runners → New self-hosted runner; config + run trên Mac) → không tốn phút GitHub, repo giữ private. Workflow đã thêm input `runner` (choice: `macos-15` mặc định / `self-hosted`), `runs-on: ${{ inputs.runner || 'macos-15' }}` — push/tag event không đổi hành vi.
+- C. Sửa billing: github.com/settings/billing → Payment information (thẻ fail) + Spending limits (nâng hạn mức Actions; overage macOS $0.08/phút); hoặc chờ reset chu kỳ — xem repo → Actions → **Usage** để biết phút đã dùng + ngày reset.
+- D. Nâng gói Pro/Team để có thêm phút kèm theo.
+
+**Trạng thái:** build/archive/IPA của run #26 = KHÔNG THỂ verify (job chưa chạy) — NOT VERIFIED giữ nguyên; các fix code vòng trước (tombstone ci-skip + set +e) vẫn đã kiểm chứng 3/3 kịch bản step-thật + suite 327/327. Khi runner thông: Re-run jobs #26 hoặc dispatch mới (chọn runner phù hợp); nếu commit #26 chưa gồm 3 file tombstone thì upload thêm chúng (patch zip có sẵn) kẻo Preflight bắt lại lỗi cũ.
+
+---
+
+## ADDENDUM 8 — NAV GESTURES + PHIM BLACK-SCREEN FIX (build 220 / 2.4.0)
+
+Bối cảnh: IPA build 219 đã cài chạy ổn định trên iPhone iOS 16.5 qua TrollStore (người dùng xác nhận). Ba yêu cầu mới, sửa tối thiểu, không đụng logic phát/video/backend.
+
+**(1) Menu ẩn mặc định + 2 cách gọi lại.** Trạng thái sẵn có giữ nguyên: overlay menu 4 icon KHÔNG tồn tại trong hierarchy khi ẩn (`if showMenu`, `@State showMenu = false`) → nội dung fullscreen edge-to-edge từ lúc mở app, không thể "tự hiện". THÊM cách gọi thứ hai song song long-press: `UIScreenEdgePanGestureRecognizer` cạnh PHẢI trên **UIWindow** (phủ cả tab lẫn sheet). Ổn định ẩn/hiện: `toggleOverlayMenu()` thêm guard `!showingPlayer` (không mở menu vô hình dưới sheet player); mọi đường mở đều idempotent.
+
+**(2) Back bằng vuốt cạnh TRÁI.** Edge-pan `.left` trên window → `handleBackGesture()` đi đúng 1 bước theo thứ tự điều hướng: (a) overlay menu đang hiện → ẩn menu; (b) sheet PlayerView → đóng sheet; (c) webview tab hiện tại còn `canGoBack` → `goBack()` qua `BinTVBackRegistry` (mỗi controller webview TỰ đăng ký closure trả "đã xử lý chưa" — không đoán mò từ ngoài); (d) root → NO-OP tuyệt đối, không thoát app. Mỗi swipe = 1 lần `.began` = tối đa 1 bước.
+
+**(3) PHIM màn hình đen khi quay lại tab — ROOT CAUSE + FIX TẬN GỐC.** `PhimController`/`YouTubeBrowser` là `WKNavigationDelegate` nhưng KHÔNG implement `webViewWebContentProcessDidTerminate(_:)`. Khi rời tab, WKWebView rời window; dưới áp lực bộ nhớ hệ thống kết thúc WebContent process → webview chỉ còn layer ĐEN và KHÔNG tự khôi phục (đúng triệu chứng: mất trạng thái, đen hoàn toàn, không tự hết). Fix chính thức của Apple: implement delegate → `webView.reload()` CHỈ khi process chết (localStorage `.default` còn nguyên nên bootstrap/catalog cache của app.js phục hồi nhanh — không tải nguội). Bổ trợ: `noteTabDidAppear()` = `setNeedsDisplay()` khi tab hiện lại (repaint layer stale/tối, KHÔNG reload). Chuyển tab bình thường không reload → giữ nguyên trạng thái đang xem (trải nghiệm native, đúng yêu cầu). Áp dụng cho cả TUBE (cùng lớp lỗi lifecycle, không đổi logic phát).
+
+**Không xung đột gesture:** cả 2 edge-pan đặt `cancelsTouchesInView = false` + `delaysTouchesBegan = false` (touch giao ngay cho webview/video/scroll; edge-pan chỉ nhận khi ngón bắt đầu trong dải sát mép — cùng triết lý interactive-pop hệ thống); long-press 0.35s và recognizer riêng của webview giữ nguyên văn.
+
+**Version:** 220 / 2.4.0. **Kiểm chứng sandbox:** brace-balance + CJK-scan 3 file sửa; T4.10 (11 assertion) guard toàn bộ cơ chế; suite **338/338 PASS**; preflight canonical mô phỏng rc=0. Compile/archive/IPA trên Xcode thật: **NOT VERIFIED** (sandbox không macOS) — cổng xác nhận GitHub Actions build 220.
