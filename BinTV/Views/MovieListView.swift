@@ -32,12 +32,18 @@ struct MovieListView: View {
     /// cũ → scale SE 32.8pt … Pro Max 44pt): hết cảnh nút quá cỡ trên màn
     /// nhỏ che video / khó bấm. WebView + toàn bộ logic browser GIỮ NGUYÊN.
     @Environment(\.uiProps) private var props
-    /// Long-press trên webview → toggle thanh tab (ContentView sở hữu
-    /// state ẩn/hiện strip — cơ chế gesture giữ nguyên từ bản cũ).
+    /// Long-press trên webview → hiện menu tab (ContentView sở hữu state
+    /// ẩn/hiện overlay — cơ chế gesture giữ nguyên từ bản cũ).
     var onLongPress: () -> Void = {}
+    /// [2026-09-12, build 221] Tab TUBE có đang được chọn hay không —
+    /// ContentView truyền vào. Trang TUBE GIỮ NGUYÊN trong hierarchy khi
+    /// chuyển tab (webview không rời window); cờ này chỉ để biết lúc nào
+    /// tab hiện trở lại (repaint + khôi phục nếu webview trống).
+    var isActive: Bool = true
 
-    init(onLongPress: @escaping () -> Void = {}) {
+    init(onLongPress: @escaping () -> Void = {}, isActive: Bool = true) {
         self.onLongPress = onLongPress
+        self.isActive = isActive
         _browser = StateObject(wrappedValue: YouTubeBrowser())
         browser.onLongPress = onLongPress
     }
@@ -96,8 +102,13 @@ struct MovieListView: View {
             // Audio session để âm thanh tiếp tục khi app ẩn / khóa màn hình
             // (kết hợp UIBackgroundModes: audio đã có sẵn trong Info.plist).
             browser.configureAudioSession()
-            // [2026-09-12] repaint layer khi tab hiện lại (chống khung hình
-            // stale/tối); KHÔNG reload — trạng thái xem được giữ nguyên.
+        }
+        .onChange(of: isActive) { active in
+            // MỖI LẦN QUAY LẠI TAB TUBE: xác nhận audio session + repaint
+            // layer (khôi phục nếu webview trống). KHÔNG reload khi trạng
+            // thái hiện tại vẫn dùng được.
+            guard active else { return }
+            browser.configureAudioSession()
             browser.noteTabDidAppear()
         }
         .onChange(of: scenePhase) { phase in
@@ -648,11 +659,22 @@ extension YouTubeBrowser {
 
     /// [2026-09-12] Repaint layer khi tab hiện lại — không reload, không
     /// mất trạng thái (chống khung hình stale/tối sau khi gắn lại window).
+    /// Kèm safety net CHỈ KHI CẦN: webview thật sự trống (`url == nil`,
+    /// không đang tải) → nạp lại trang chủ YouTube (tối đa 3 lần).
     func noteTabDidAppear() {
         webView.setNeedsDisplay()
+        guard restoreAttempts < 3 else { return }
+        guard !webView.isLoading, webView.url == nil else { return }
+        restoreAttempts += 1
+        webView.load(URLRequest(url: URL(string: "https://www.youtube.com")!))
     }
 
+    /// Số lần đã thử nạp lại trang trống (chống vòng lặp reload vô hạn).
+    private var restoreAttempts = 0
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // Trang đã tải xong → reset bộ đếm khôi phục (không reload bừa).
+        restoreAttempts = 0
         let url = webView.url
         let isWatch = (url?.path.hasPrefix("/watch") ?? false)
             || (url?.path.hasPrefix("/embed/") ?? false)

@@ -73,10 +73,14 @@ enum BinTVPage: Int, CaseIterable, Identifiable {
 /// (`selectedTab`, `showMenu`) và truyền binding vào — view này KHÔNG
 /// giữ state riêng, KHÔNG đụng logic 4 trang (Rule 2: bảo tồn).
 struct GestureOverlayMenuView: View {
-    /// Trang đang chọn (tag TabView 0…3) — icon tap ghi thẳng vào đây.
+    /// Trang đang chọn (0…3 — BinTVPage) — dùng để tô sáng icon active.
     @Binding var selectedTab: Int
     /// Ẩn/hiện overlay — icon tap và nền tap đều set false NGAY LẬP TỨC.
     @Binding var isPresented: Bool
+    /// [2026-09-12, build 221] Chọn trang: truyền về ContentView
+    /// (`selectTab`) để nơi đó ghi lịch sử Back + mount trang — view này
+    /// KHÔNG tự ghi state điều hướng (vẫn không giữ state riêng).
+    var onSelect: (Int) -> Void = { _ in }
 
     @Environment(\.uiProps) private var props
 
@@ -116,9 +120,10 @@ struct GestureOverlayMenuView: View {
     private func iconButton(_ page: BinTVPage) -> some View {
         let isSelected = (selectedTab == page.rawValue)
         return Button {
-            // Chuyển trang + ẩn overlay TRONG CÙNG MỘT ACTION → TabView đổi
-            // selection ngay ở lần render kế tiếp (phản hồi tức thì, Rule 3).
-            selectedTab = page.rawValue
+            // Chuyển trang + ẩn overlay TRONG CÙNG MỘT ACTION → trang mới
+            // hiện ngay ở lần render kế tiếp (phản hồi tức thì, Rule 3).
+            // `onSelect` đi qua ContentView.selectTab (ghi lịch sử Back).
+            onSelect(page.rawValue)
             dismiss()
         } label: {
             Image(systemName: page.icon)
