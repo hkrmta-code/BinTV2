@@ -115,6 +115,15 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         menuGesture.minimumPressDuration = 0.35
         menuGesture.cancelsTouchesInView = false
         webView.addGestureRecognizer(menuGesture)
+        // [2026-09-12] Đăng ký vào chuỗi Back toàn app (vuốt cạnh trái):
+        // CHỈ xử lý khi webview thật sự còn lịch sử (canGoBack) — trả false
+        // thì ContentView rơi tiếp xuống mức "root = không làm gì", không
+        // bao giờ Back hụt hay thoát app. Không đụng logic tải/phát phim.
+        BinTVBackRegistry.shared.register(tab: BinTVPage.phim.rawValue) { [weak self] in
+            guard let wv = self?.webView, wv.canGoBack else { return false }
+            wv.goBack()
+            return true
+        }
         PhimDebugLog.step("WEBVIEW", "controllerInit", "ok", "inline=true autoplay=all bridge=shimmed")
     }
 
@@ -580,6 +589,35 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     // Navigation delegate — lỗi main frame → overlay "Thử lại"
     // =====================================================================
 
+    // ---------------------------------------------------------------------
+    // [FIX 2026-09-12 — ROOT CAUSE "tab PHIM màn hình đen khi quay lại"]
+    // Khi người dùng rời tab PHIM, WKWebView bị tháo khỏi window; dưới áp
+    // lực bộ nhớ hệ thống CÓ THỂ chấm dứt WebContent process của nó. Mặc
+    // định WKWebView khi đó chỉ còn layer ĐEN TRỐNG và KHÔNG tự khôi phục
+    // — bản trước không implement delegate này nên quay lại tab PHIM là
+    // đen vĩnh viễn (đúng triệu chứng người dùng báo: mất trạng thái hiển
+    // thị, màn hình đen hoàn toàn). Đây là cơ chế khôi phục CHÍNH THỨC của
+    // Apple: reload khi process chết. localStorage (websiteDataStore
+    // .default) vẫn còn nên bootstrap/catalog cache của app.js sống sót —
+    // reload phục hồi nhanh, KHÔNG phải tải nguội.
+    // Quan trọng: chỉ reload KHI process thật sự chết — mọi lần chuyển tab
+    // bình thường KHÔNG hề reload (giữ nguyên trạng thái đang xem, đúng
+    // yêu cầu "ưu tiên giữ lại trạng thái PHIM").
+    // ---------------------------------------------------------------------
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        PhimDebugLog.step("WEBVIEW", "webContentProcessDidTerminate", "RELOAD",
+                           "WebContent process bị hệ thống kết thúc — reload phục hồi")
+        webView.reload()
+    }
+
+    /// [2026-09-12] Gọi khi tab PHIM hiện trở lại: yêu cầu WKWebView vẽ lại
+    //  layer (setNeedsDisplay) để tránh khung hình stale/tối sau khi view
+    //  được gắn lại vào window — hoàn toàn không reload, không mất trạng
+    //  thái. Rẻ và an toàn (chỉ đánh dấu cần vẽ).
+    func noteTabDidAppear() {
+        webView.setNeedsDisplay()
+    }
+
     /// Page load xong → inject lại chiều cao status bar (rotation có thể
     /// đổi giá trị giữa các lần load).
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -621,7 +659,12 @@ struct PhimView: View {
             }
         }
         .ignoresSafeArea()
-        .onAppear { controller.startAndLoadIfNeeded() }
+        .onAppear {
+            controller.startAndLoadIfNeeded()
+            // [2026-09-12] repaint layer khi tab hiện lại (chống khung hình
+            // stale/tối); KHÔNG reload — trạng thái đang xem được giữ.
+            controller.noteTabDidAppear()
+        }
     }
 
     // Port ErrorScreen.java — chỉ hiện khi server/webview lỗi.
