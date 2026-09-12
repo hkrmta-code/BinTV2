@@ -611,17 +611,44 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     }
 
     /// [2026-09-12] Gọi khi tab PHIM hiện trở lại: yêu cầu WKWebView vẽ lại
-    //  layer (setNeedsDisplay) để tránh khung hình stale/tối sau khi view
-    //  được gắn lại vào window — hoàn toàn không reload, không mất trạng
-    //  thái. Rẻ và an toàn (chỉ đánh dấu cần vẽ).
+    /// layer (setNeedsDisplay) để tránh khung hình stale/tối — hoàn toàn
+    /// KHÔNG reload, không mất trạng thái (chỉ đánh dấu cần vẽ).
+    /// Kèm theo safety-net `restoreIfEmpty()`: chỉ nạp lại trang khi
+    /// webview thật sự trống (bị giải phóng/chưa có nội dung) — đúng yêu
+    /// cầu "nếu view bị giải phóng thì phải khôi phục đúng cách", nhưng
+    /// KHÔNG reload khi cache/trạng thái hiện tại vẫn dùng được.
     func noteTabDidAppear() {
         webView.setNeedsDisplay()
+        restoreIfEmpty()
+    }
+
+    /// Số lần đã thử nạp lại trang trống (chống vòng lặp reload vô hạn).
+    private var restoreAttempts = 0
+
+    /// Safety net CHỈ KHI CẦN: webview không có nội dung (`url == nil`,
+    /// không đang tải) mà server nội bộ đã sẵn sàng → nạp lại đúng trang.
+    /// Tối đa 3 lần; reset khi một trang đã tải xong (`didFinish`) →
+    /// chuyển tab bình thường KHÔNG BAO GIỜ reload (giữ nguyên trạng thái
+    /// phim đang xem, đúng yêu cầu "ưu tiên giữ lại trạng thái PHIM").
+    private func restoreIfEmpty() {
+        guard restoreAttempts < 3 else { return }
+        guard !webView.isLoading else { return }
+        guard webView.url == nil else { return }
+        let port = server?.port ?? PhimLocalServer.shared.port
+        guard port > 0 else { return }
+        restoreAttempts += 1
+        PhimDebugLog.step("WEBVIEW", "restoreIfEmpty", "RELOAD",
+                          "webview trống — nạp lại trang (lần \(restoreAttempts))")
+        loadPage()
     }
 
     /// Page load xong → inject lại chiều cao status bar (rotation có thể
     /// đổi giá trị giữa các lần load).
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         PhimDebugLog.step("WEBVIEW", "didFinishNavigation", "ok", PhimDebugLog.sanitizeURL(webView.url?.absoluteString ?? ""))
+        // Trang đã tải xong → webview có nội dung thật: reset bộ đếm
+        // khôi phục (không reload bừa ở những lần chuyển tab kế tiếp).
+        restoreAttempts = 0
         injectStatusBarInset()
     }
 
@@ -650,6 +677,11 @@ struct PhimView: View {
     @StateObject private var controller = PhimController()
     /// Long-press → hiện menu tab (gắn bởi ContentView, nhất quán 4 tab).
     var onLongPress: () -> Void = {}
+    /// [2026-09-12, build 221] Tab PHIM có đang được chọn hay không —
+    /// ContentView truyền vào. Trang PHIM GIỮ NGUYÊN trong hierarchy khi
+    /// chuyển tab (không bị gỡ → webview không bao giờ rời window); cờ
+    /// này chỉ để biết lúc nào tab hiện trở lại.
+    var isActive: Bool = true
 
     var body: some View {
         ZStack {
@@ -660,9 +692,16 @@ struct PhimView: View {
         }
         .ignoresSafeArea()
         .onAppear {
+            // Lần đầu tab PHIM được mở: khởi server + tải web app
+            // (idempotent — `started` guard).
             controller.startAndLoadIfNeeded()
-            // [2026-09-12] repaint layer khi tab hiện lại (chống khung hình
-            // stale/tối); KHÔNG reload — trạng thái đang xem được giữ.
+        }
+        .onChange(of: isActive) { active in
+            // MỖI LẦN QUAY LẠI TAB PHIM (kể cả sau nhiều lần chuyển
+            // qua lại): repaint layer + khôi phục nếu webview trống.
+            // KHÔNG reload khi trạng thái hiện tại vẫn dùng được.
+            guard active else { return }
+            controller.startAndLoadIfNeeded()
             controller.noteTabDidAppear()
         }
     }
