@@ -156,6 +156,11 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
     /// Mỗi trang video chỉ tự động fullscreen 1 lần (tránh tự bật lại sau
     /// khi người dùng đã thoát bằng vuốt xuống).
     private var theaterArmed = true
+    /// [2026-09-12, build 221] Số lần đã thử nạp lại trang khi webview thật
+    /// sự trống (chống vòng lặp reload vô hạn). PHẢI nằm trong thân class —
+    /// extension KHÔNG được chứa stored property (lỗi biên dịch Xcode:
+    /// "extensions must not contain stored properties"). Reset ở didFinish.
+    private var restoreAttempts = 0
     /// App đã bị xoay sang landscape DÙ VÌ video ngang fullscreen — khi video
     /// ra khỏi fullscreen phải xoay về portrait (khôi phục layout ban đầu).
     private var isLandscapeSessionActive = false
@@ -668,9 +673,6 @@ extension YouTubeBrowser {
         restoreAttempts += 1
         webView.load(URLRequest(url: URL(string: "https://www.youtube.com")!))
     }
-
-    /// Số lần đã thử nạp lại trang trống (chống vòng lặp reload vô hạn).
-    private var restoreAttempts = 0
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         // Trang đã tải xong → reset bộ đếm khôi phục (không reload bừa).

@@ -195,3 +195,34 @@ token sanitization across `PhimLocalServer`/`PhimWebView`; build number 216 → 
   preserved). Same lifecycle fix applied to TUBE's webview.
 - New gestures use cancelsTouchesInView=false / delaysTouchesBegan=false:
   video controls, scrolling and web taps unaffected. Tests: 338/338.
+
+## Menu bar thật sự biến mất + Back cạnh trái + PHIM giữ trạng thái (build 221 / 2.4.1)
+
+Root cause của "menu bar vẫn hiện" ở bản 219/220: `TabChromeController`
+(UIViewControllerRepresentable gắn ở `.background()` NGOÀI `NavigationView`)
+đi NGƯỢC lên `vc.parent` để tìm `UITabBarController`, trong khi
+UITabBarController là HẬU DUỆ của root hosting controller → không bao giờ
+tìm thấy → `tabBar.isHidden` không chạy (bar vẫn hiện) và cả long-press
+global lẫn 2 edge-pan cũng không bao giờ được gắn.
+
+- **Bỏ hẳn `TabView`**: 4 trang xếp trong `ZStack` do `ContentView` điều
+  khiển → không có UITabBarController → không có menu bar nào để ẩn, và
+  nội dung chiếm TOÀN BỘ màn hình (lấy lại đúng vùng bar cũ).
+- **Giữ trang trong hierarchy**: `mountedTabs` — trang đã mở thì không bao
+  giờ bị gỡ (webview PHIM/TUBE không rời window) → hết màn hình đen, giữ
+  nguyên trạng thái đang xem, không reload.
+- **Gesture gắn thẳng trên `UIWindow`** (tổ tiên của mọi view, phủ cả
+  sheet): giữ ≥0.35s = menu; vuốt cạnh phải = menu; vuốt cạnh trái = Back
+  1 bước (menu → sheet player → lịch sử webview → lùi tab trước đó → root
+  no-op, không bao giờ thoát app).
+- **Delegate `shouldReceive`** nhường vùng có gesture riêng: WKWebView
+  (long-press riêng của webview; swipe back/forward nội bộ của TUBE),
+  UIControl/ô nhập liệu (chọn/paste), menu đang mở, player sheet → không
+  xung đột với thao tác vuốt/điều khiển video hiện có.
+- PHIM: thêm `restoreIfEmpty()` (chỉ nạp lại khi webview thật sự trống,
+  tối đa 3 lần, reset khi tải xong) bên cạnh
+  `webViewWebContentProcessDidTerminate` đã có ở bản 220.
+- Tests: **430/430 PASS** (T1 40 + T2 55 + T3 53 + T4 211 + **T5 71** —
+  mirror state-machine của luồng menu/Back/PHIM). Swift parse-check toàn
+  bộ file bằng toolchain Swift thật: PASS (không có macOS/UIKit → chưa
+  compile/link; cổng xác nhận = GitHub Actions build 221).

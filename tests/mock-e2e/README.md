@@ -16,6 +16,7 @@ node run_all.js          # chạy cả 4 suite; exit 0 = tất cả pass
 | **T1** `test_app_js_logic.js` | Chạy các hàm **CẮT NGUYÊN VĂN từ `app.js` thật** (brace-matching, không hard-code logic trong test) trong Node VM + stub DOM/XHR: `extractMovieTargetUrl`, `normalizeMovieManifestUrl`, `isValidMovieTargetUrl`, `getMovieBaseUrl`, `buildMovieResourceUrl`, `requestJson`, `fetchMovieStreamsShared`, khối lọc `validStreams` của `loadMovieStreams`, và **khối proxy-wrap thật** của `startMoviePlayback`. | Nếu `app.js` đổi, slice tự lấy bản mới. Verify đúng chuỗi Click Phim → API → parse → extract stream → wrap `/proxy?url=&__ref=`. |
 | **T2** `test_m3u8_rewrite.js` | Test **bản port 1:1 sang JS** (`lib/swift_mirror.js`, mỗi hàm chú thích dòng Swift nguồn) của `rewriteM3u8Urls`/`proxifyM3u8Value`/`encodeQueryValue`/`originOf`/`baseUrlOf`/`rewriteUriAttrs`/`rewriteRedirectLocation`/`isM3u8*`: master+variant, `EXT-X-KEY`, `EXT-X-MAP`, relative/absolute children, chống double-proxy, lan truyền `__ref`, CRLF, encoding edge cases. | Thuật toán rewrite m3u8 (trái tim của proxy HLS) được phủ vector đầy đủ. |
 | **T3** `test_proxy_chain_e2e.js` | **E2E HTTP live**: mock CDN (`lib/mock_cdn.js` — gate Referer như CDN thật, thiếu → 403; redirect 302 tuyệt đối; token-hết-hạn → playlist quảng cáo; MP4 + Range/206) + mirror proxy (`lib/mirror_proxy.js` — đúng header contract `PhimLocalServer.swift`: UA Chrome 126, Referer/Origin từ `__ref`, `Accept-Encoding: identity`, Range/If-Range forward, không follow redirect, bọc Location, rewrite m3u8, ACAO `*`, HEAD) + **app.js thật** điều khiển toàn chuỗi. Assert bytes segment/key/MP4 nguyên vẹn và **header tới được CDN** (log phía CDN). | Chứng minh data-flow vào player: URL cuối hợp lệ, playlist tree đi hết qua proxy, Referer chống 403 hoạt động, redirect không lộ upstream. |
+| **T5** `test_nav_flow.py` | Mirror state-machine của `ContentView` (menu/Back/mountedTabs/tabHistory) + lifecycle WKWebView + delegate gesture: mở app menu ẩn; long-press & cạnh phải gọi menu; Back 7 nhịp đúng thứ tự; PHIM ↔ LIVE TV ↔ TUBE ×10 lượt không remount/không reload; khôi phục khi webview trống; các quyết định nhường gesture. | Phủ đúng checklist nghiệm thu: menu bar, Back cạnh trái, PHIM đen, không xung đột gesture. |
 | **T4** `test_project_consistency.py` | Tĩnh: pbxproj ↔ đĩa (14 Swift trong Sources; `AppDelegate.swift` stub KHÔNG bị build; Web là folder trong Resources), Info.plist ↔ pbxproj (build 217, landscape-only iPhone+iPad, ATS local networking), **thứ tự fix** (`allowsInlineMediaPlayback = true` TRƯỚC `WKWebView(frame:configuration:)`), 3 lớp orientation, brace-balance mọi file Swift, `node --check` mọi JS asset + index.html refs, scheme UUID, workflow `build-ipa.yml`. | Chống lỗi "push lên GitHub Actions mới phát hiện". |
 
 ## Giới hạn trung thực (phải đọc)
@@ -56,5 +57,11 @@ node run_all.js          # chạy cả 4 suite; exit 0 = tất cả pass
   mọi step tee -a, artifact `xbuild-log` if: always()) + tombstone ci-skip
   cho 3 file khai tử (whitelist chặt T4.1 + mô phỏng trọn Preflight 2.1:
   missing = 0 trên canonical)**.
-- Tổng: **338/338 PASS** (T4.9 guard runner self-hosted; T4.10 guard nav
-  gestures 2026-09-12 + fix PHIM màn đen).
+- T5: **71/71 PASS** — mirror state-machine luồng điều hướng build 221:
+  menu ẩn mặc định/2 cách gọi/idempotent; Back 7 nhịp đúng thứ tự
+  (menu → sheet → webview → tab trước đó → root NO-OP, không thoát
+  app); **PHIM ↔ LIVE TV ↔ TUBE ×10 lượt: mount 1 lần, reload 0 lần**, webview luôn trong window; khôi phục khi webview trống (1 lần, tối đa
+  3, dừng nếu server chưa có port/đang tải); delegate gesture nhường
+  đúng vùng (webview/UIControl/menu/player).
+- Tổng: **430/430 PASS** (T4.9 guard runner self-hosted; T4.10 guard menu
+  ẩn + gesture build 221 + PHIM giữ trạng thái).

@@ -423,3 +423,70 @@ Bối cảnh: IPA build 219 đã cài chạy ổn định trên iPhone iOS 16.5 
 **Không xung đột gesture:** cả 2 edge-pan đặt `cancelsTouchesInView = false` + `delaysTouchesBegan = false` (touch giao ngay cho webview/video/scroll; edge-pan chỉ nhận khi ngón bắt đầu trong dải sát mép — cùng triết lý interactive-pop hệ thống); long-press 0.35s và recognizer riêng của webview giữ nguyên văn.
 
 **Version:** 220 / 2.4.0. **Kiểm chứng sandbox:** brace-balance + CJK-scan 3 file sửa; T4.10 (11 assertion) guard toàn bộ cơ chế; suite **338/338 PASS**; preflight canonical mô phỏng rc=0. Compile/archive/IPA trên Xcode thật: **NOT VERIFIED** (sandbox không macOS) — cổng xác nhận GitHub Actions build 220.
+
+---
+
+## ADDENDUM 9 — MENU BAR BIẾN MẤT THẬT SỰ + BACK CẠNH TRÁI + PHIM GIỮ TRẠNG THÁI (build 221 / 2.4.1)
+
+Bối cảnh: người dùng xác nhận IPA 220 chạy ổn trên iPhone iOS 16.5 (TrollStore), nhưng **menu bar (LIVE TV / TUBE / PHIM / SETTING) VẪN HIỆN** và 2 cách gọi menu + Back cạnh trái **chưa hề hoạt động**. Phân tích lại mã nguồn 220 phát hiện lỗi nền tảng (không phải lỗi runtime ngẫu nhiên):
+
+### (1) Root cause "menu bar vẫn hiện" — sai hướng tìm UITabBarController
+
+`TabChromeController` (build 219/220) là `UIViewControllerRepresentable` được gắn ở `.background(...)` của **GeometryReader**, tức là nằm **NGOÀI** `NavigationView`. VC của nó có parent chain đi **NGƯỢC LÊN**: `childVC → root UIHostingController → nil`. Trong khi đó `UITabBarController` (do SwiftUI `TabView` sinh ra) là **HẬU DUỆ** của root — nằm bên trong NavigationView. Vòng lặp
+
+```swift
+while let r = responder, !(r is UITabBarController) { responder = r.parent }
+```
+
+**vĩnh viễn không gặp nó** → retry 10 lần rồi bỏ cuộc. Hệ quả (đúng 100% triệu chứng người dùng báo):
+- `tbc.tabBar.isHidden = true` **KHÔNG BAO GIỜ chạy** → menu bar hiện;
+- long-press global + 2 edge-pan nằm **cùng một nhánh `guard let tbc`** → cũng **KHÔNG BAO GIỜ được gắn** → "giữ màn hình" chỉ hoạt động trên TUBE/PHIM nhờ recognizer riêng của webview, còn "vuốt cạnh phải/trái" không tồn tại trong IPA.
+- Kể cả khi tìm được, `TabView` vẫn luôn dành một dải inset phía dưới bằng chiều cao bar → nội dung không thể "mở rộng tận dụng phần bị menu bar chiếm".
+
+**Fix (mục tiêu, không vá):** bỏ hẳn `TabView` — 4 trang xếp trong `ZStack` do `ContentView` điều khiển bằng `selectedTab`. Không có `UITabBarController` → **không có menu bar nào để phải ẩn**; nội dung tự lấp toàn bộ màn hình. Menu điều hướng chỉ tồn tại dạng overlay `if showMenu` (mặc định `false` → không có trong hierarchy, 0% chặn touch). `BinTVPage` rawValue 0…3 và 4 trang con giữ nguyên 100% (chỉ thêm tham số `isActive`).
+
+### (2) Gesture gắn thẳng trên UIWindow — không cần tìm TabBar nữa
+
+`BinTVWindowGestures` (UIViewControllerRepresentable) gắn 3 recognizer lên **key `UIWindow`** (tổ tiên của mọi view, phủ cả sheet PlayerView): `BinTVMenuLongPressRecognizer` 0.35s → menu; edge-pan `.right` → menu; edge-pan `.left` → Back. Window chưa sẵn sàng → retry 0.15s × 40. Idempotent (mỗi loại đúng 1 lần, nhận diện bằng lớp con riêng).
+
+**Chống xung đột** (`UIGestureRecognizerDelegate.gestureRecognizer(_:shouldReceive:)`):
+| Vùng touch | Quyết định | Lý do |
+|---|---|---|
+| Trong `WKWebView` (long-press) | **từ chối** | webview đã có recognizer riêng (PHIM 0.35s / TUBE 0.4s) — không huỷ thao tác trang |
+| `UIControl` / `UITextInput` | **từ chối** | nhường long-press chọn/paste của hệ thống (ô nhập URL trong Settings) |
+| Menu đang mở / player sheet đang mở | **từ chối** | nút menu + điều khiển video phải nhận touch bình thường |
+| Edge-pan trong webview có `allowsBackForwardNavigationGestures` (TUBE) | **từ chối** | tránh Back/Next 2 lần cho một cái vuốt |
+| Còn lại | nhận | Live TV / Settings / vùng nội dung thường |
+
+`shouldRecognizeSimultaneouslyWith → true`, edge-pan `cancelsTouchesInView = false` + `delaysTouchesBegan = false` → scroll/vuốt/pinch/điều khiển video không bị cướp.
+
+### (3) Back cạnh trái — 5 bước, không bao giờ thoát app
+
+`handleBackGesture()`: (1) menu đang mở → đóng menu; (2) player sheet → đóng sheet; (3) `BinTVBackRegistry.perform(tab:)` → webview `canGoBack` thật mới `goBack()` 1 bước; (4) **MỚI**: lùi về tab trước đó qua `tabHistory` (đúng "màn hình trước đó 1 bước", vẫn còn màn hình trước thì không bao giờ thoát app); (5) root → NO-OP tuyệt đối. Mỗi lần vuốt = 1 lần `.began` = tối đa 1 bước.
+
+### (4) PHIM màn hình đen — xử lý NGUYÊN NHÂN (không che lỗi)
+
+Bản 220 xử lý phần ngọn (`webViewWebContentProcessDidTerminate` → reload) — **giữ nguyên**. Bản 221 triệt tiêu nguyên nhân: với `ZStack` + `mountedTabs`, trang PHIM **không bao giờ bị gỡ khỏi hierarchy** → `WKWebView` không rời window → WebContent process không bị kill do chuyển tab → không đen, và **giữ nguyên trạng thái đang xem** (không reload, trải nghiệm native). Hai lớp bổ trợ: `noteTabDidAppear()` (`setNeedsDisplay()` mỗi lần tab hiện lại) và `restoreIfEmpty()` — **chỉ** nạp lại khi webview thật sự trống (`url == nil`, không đang tải, server có port), tối đa 3 lần, reset khi `didFinish` → không reload bừa, không vòng lặp. Áp dụng tương tự cho TUBE.
+
+### Kiểm chứng (sandbox, không có macOS/Xcode)
+
+- **Swift parse-check bằng toolchain Swift 5.9 thật** (download.swift.org): toàn bộ 16 file nguồn `swiftc -parse` → **0 lỗi cú pháp** (không có UIKit trên Linux nên dừng ở parse, chưa type-check/link).
+- **Suite mock-E2E: 430/430 PASS** — T1 40 + T2 55 + T3 53 + T4 211 + **T5 71 (MỚI)**.
+  - **T5 (`tests/mock-e2e/test_nav_flow.py`)** = mirror 1:1 state-machine của `ContentView` (menu/Back/mountedTabs/tabHistory) + lifecycle webview + delegate gesture: mở app menu ẩn; long-press & cạnh phải gọi menu; idempotent; không mở dưới sheet; Back 7 nhịp đúng thứ tự (menu → sheet → webview → tab → root no-op, không thoát app); **PHIM ↔ LIVE TV ↔ TUBE ×10 lượt: mount 1 lần, reload 0 lần, webview luôn trong window**; khôi phục khi webview trống (1 lần, tối đa 3, dừng khi server chưa có port/không đang tải).
+- **Preflight GitHub Actions**: không thêm file `.swift` mới (chỉ sửa 4 file đã có trong Compile Sources) → check xuôi/ngược disk ↔ Compile Sources vẫn XANH; `yaml.safe_load` workflow VALID, không đụng pipeline.
+- **Version:** 221 / 2.4.1 (pbxproj `CURRENT_PROJECT_VERSION` + `MARKETING_VERSION`, Info.plist `CFBundleVersion` / `CFBundleShortVersionString`).
+- **NOT VERIFIED (trung thực):** compile/type-check bằng UIKit thật, archive, đóng gói IPA, và test trên iPhone iOS 16.5 — cần Xcode/macOS. Cổng xác nhận: GitHub Actions build 221 + cài qua TrollStore.
+
+---
+
+## ADDENDUM 10 — SỬA LỖI BIÊN DỊCH RUN 221 (xbuild.log thật): "extensions must not contain stored properties"
+
+**Log thật:** `/Users/runner/work/BinTV2/BinTV2/BinTV/Views/MovieListView.swift:673:17: error: extensions must not contain stored properties` → `xcodebuild exit 65` → không có `.xcarchive` → job fail.
+
+**Root cause:** khi thêm safety net `restoreIfEmpty` cho tab TUBE, khai báo `private var restoreAttempts = 0` bị đặt **bên trong `extension YouTubeBrowser`** (block delegate, bắt đầu dòng 631). Swift **cấm** stored property trong extension (chỉ `static`/computed mới được) — đây là lỗi ở bước **type-check**, nên `swiftc -parse` (kiểm chứng ở sandbox) **không thể phát hiện**. Cùng lỗi ở PHIM thì KHÔNG xảy ra vì `restoreAttempts` của `PhimController` được đặt trong thân class.
+
+**Fix:** chuyển khai báo vào **thân `final class YouTubeBrowser`** (ngay sau `private var theaterArmed = true`), giữ nguyên toàn bộ logic (`noteTabDidAppear` tăng/bảo vệ bộ đếm, `didFinish` reset).
+
+**Guard chống tái diễn (MỚI — T4.5b trong `tests/mock-e2e/test_project_consistency.py`):** quét toàn bộ file Swift, xác định **thành viên trực tiếp** của mỗi `extension` (depth == extension_depth + 1, không bắt nhầm biến cục bộ trong thân hàm) và fail nếu có `var/let` không phải `static`/computed. Guard **tự kiểm chứng** bằng cách tạo file probe có lỗi và xác nhận nó bị bắt. Suite: **432/432 PASS**.
+
+**Trung thực:** các lỗi chỉ lộ ở bước type-check/link bằng UIKit thật (không có trên Linux) vẫn cần GitHub Actions làm cổng xác nhận cuối; mỗi lỗi mới lộ ra đều được bổ sung guard tĩnh như trên.

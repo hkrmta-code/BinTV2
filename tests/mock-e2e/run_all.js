@@ -10,6 +10,7 @@ const suites = [
     ["T2 m3u8 rewrite (port 1:1 PhimLocalServer.swift)", "node", ["test_m3u8_rewrite.js"]],
     ["T3 E2E proxy chain (mock CDN + mirror proxy + app.js thật)", "node", ["test_proxy_chain_e2e.js"]],
     ["T4 project consistency (pbxproj/plist/fixes/JS assets)", "python3", ["test_project_consistency.py"]],
+    ["T5 luồng điều hướng build 221 (menu ẩn / Back cạnh trái / PHIM giữ trạng thái)", "python3", ["test_nav_flow.py"]],
 ];
 
 let allOk = true;

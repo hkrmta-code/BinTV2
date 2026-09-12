@@ -71,9 +71,9 @@ ok(re.search(r"isa = PBXResourcesBuildPhase", pbx) is not None, "có Resources b
 ok("Web in Resources" in pbx, "Web nằm trong Resources phase")
 
 print("\n=== T4.2 — Info.plist ↔ pbxproj ===")
-eq(plist["CFBundleVersion"], "220", "CFBundleVersion = 220 (bản Nav Gestures + PHIM fix)")
+eq(plist["CFBundleVersion"], "221", "CFBundleVersion = 221 (bản Menu ẩn + Back cạnh trái + PHIM giữ trạng thái)")
 cv = re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", pbx)
-ok(len(cv) == 2 and all(v == "220" for v in cv), f"CURRENT_PROJECT_VERSION=220 cả 2 config (Debug/Release)", str(cv))
+ok(len(cv) == 2 and all(v == "221" for v in cv), f"CURRENT_PROJECT_VERSION=221 cả 2 config (Debug/Release)", str(cv))
 eq(plist["CFBundleShortVersionString"], re.findall(r"MARKETING_VERSION = ([\d.]+);", pbx)[0], "CFBundleShortVersionString khớp MARKETING_VERSION")
 eq(sorted(plist["UISupportedInterfaceOrientations"]),
    sorted(["UILandscapeLeftInterfaceOrientation", "UILandscapeRightInterfaceOrientation"]),
@@ -174,6 +174,54 @@ for p in swift_on_disk:
     good, why = balance(os.path.join(ROOT, p))
     ok(good, f"balance OK: {p}", why)
 
+# --- T4.5b [build 221] MỚI: stored property trong extension ---
+# Xcode chỉ báo ở bước type-check ("extensions must not contain stored
+# properties", exit 65) — swiftc -parse KHÔNG bắt được, nên cần guard riêng.
+# Đây chính là lỗi làm hỏng run build 221 đầu tiên
+# (MovieListView.swift:673: private var restoreAttempts = 0 nằm trong
+#  extension YouTubeBrowser). Chỉ xét THÀNH VIÊN TRỰC TIẾP của extension
+# (depth == extension_depth + 1) → không bắt nhầm biến cục bộ trong thân hàm.
+print("\n=== T4.5b — Không có stored property nào nằm trong extension ===")
+DECL = re.compile(r'^\s*(?:(?:private|fileprivate|internal|public|open|package)\s+)*'
+                  r'(?:(?:static|class|weak|unowned|lazy)\s+)*'
+                  r'(var|let)\s+\w+')
+EXTRE = re.compile(r'^\s*(?:(?:private|fileprivate|internal|public|open|final)\s+)*extension\b.*\{\s*$')
+
+
+def stored_props_in_ext(path):
+    bad, depth, stack = [], 0, []
+    for i, raw in enumerate(open(path, encoding="utf-8").read().splitlines(), 1):
+        line = re.sub(r'//.*$', '', raw).rstrip()
+        cur = depth
+        if DECL.match(line) and stack and stack[-1][1] == "extension" and stack[-1][0] + 1 == cur:
+            if not re.search(r'\b(static|class)\s+(var|let)', line) and "{" not in line:
+                bad.append(f"{path}:{i}: {raw.strip()}")
+        opens = line.count("{") - line.count("}")
+        if EXTRE.match(line):
+            stack.append((cur, "extension"))
+        depth += opens
+        while stack and depth <= stack[-1][0]:
+            stack.pop()
+    return bad
+
+
+ext_bad = []
+for _p in swift_on_disk:
+    ext_bad += stored_props_in_ext(os.path.join(ROOT, _p))
+ok(not ext_bad, "KHÔNG có stored property trong extension (lỗi exit 65 thực tế ở run 221)",
+   "; ".join(ext_bad))
+
+# Kiểm tra chéo: cơ chế quét PHẢI bắt được lỗi nếu nó xuất hiện trở lại
+_probe = "struct P {}\nextension P {\n    private var ghost = 0\n}\n"
+_tmp = os.path.join(ROOT, "..", "__probe_ext.swift")
+try:
+    open(_tmp, "w", encoding="utf-8").write(_probe)
+    ok(len(stored_props_in_ext(_tmp)) == 1,
+       "guard tự kiểm tra: phát hiện đúng stored property trong extension (không bắt nhầm)")
+finally:
+    if os.path.exists(_tmp):
+        os.remove(_tmp)
+
 print("\n=== T4.6 — Web assets: JS hợp lệ + index.html references tồn tại ===")
 assets_dir = os.path.join(WEB, "assets")
 js_files = [f for f in sorted(os.listdir(assets_dir)) if f.endswith(".js")]
@@ -239,14 +287,17 @@ ok("BrowserTabBar" not in cvsrc_code and "NewTabPageView" not in cvsrc_code
    "ContentView (code) sạch chrome cũ (strip/NTP/grabber)")
 ok("GestureOverlayMenuView(selectedTab:" in cvsrc, "overlay menu gắn trong ContentView")
 ok("if showMenu" in cvsrc, "overlay chỉ trong hierarchy khi hiện (ẩn = 0% chặn touch)")
-ok("TabChromeController" in cvsrc and "BinTVMenuLongPressRecognizer" in cvsrc,
-   "gesture plumbing UIKit CŨ giữ nguyên văn (không xung đột tap/scroll)")
+ok("BinTVMenuLongPressRecognizer" in cvsrc, "recognizer long-press chuyên biệt (0.35s) vẫn dùng")
 ok("toggleOverlayMenu" in cvsrc, "long-press → mở overlay menu")
 ok("minimumPressDuration = 0.35" in cvsrc and "delaysTouchesBegan = false" in cvsrc,
    "recognizer 0.35s + delaysTouchesBegan=false (Rule 3: mượt, không trễ touch)")
 ok(".navigationBarHidden(true)" in cvsrc, "nav bar hệ thống ẩn — fullscreen edge-to-edge")
-ok(cvsrc.count(".tag(BinTVPage.") == 4, "TabView giữ đúng 4 tag 0…3")
-ok("tabBar.isHidden = true" in cvsrc, "bottom menu bar vẫn bị ẩn VĨNH VIỄN (yêu cầu gỡ bar dưới)")
+# [build 221] KHÔNG CÒN TabView: không sinh UITabBarController → không có menu bar để ẩn
+ok("TabView" not in cvsrc_code, "ContentView (code) KHÔNG còn TabView — không sinh menu bar")
+ok(".tag(BinTVPage." not in cvsrc, "không còn .tabItem/.tag của TabView (bar dưới bị khai tử)")
+ok("tabBar" not in cvsrc_code, "không còn tham chiếu tabBar trong code (không cần ẩn thủ công)")
+ok("ZStack {" in cvsrc_code and "pageStack" in cvsrc, "4 trang xếp trong ZStack do ContentView điều khiển")
+ok("mountedTabs" in cvsrc, "trang đã mở được GIỮ VĨNH VIỄN trong hierarchy (mountedTabs)")
 ok(".navigationViewStyle(.stack)" in cvsrc, "NavigationView stack — không split 2 cột iPad")
 ok("UIProportions(size: geo.size)" in cvsrc and ".environment(\\.uiProps" in cvsrc, "scaling \u005c.uiProps giữ từ build 218")
 # (d) UIProportions có metrics overlay
@@ -326,18 +377,35 @@ ok(not sim_missing, "mô phỏng Preflight 2.1 trên canonical: missing = 0 → 
 ok("inputs.runner || 'macos-15'" in yml and "self-hosted" in yml,
    "công tắc runner: mặc định macos-15 giữ nguyên, tùy chọn self-hosted (thoát chặn billing)")
 
-print("\n=== T4.10 — Nav gestures 2026-09-12 (edge-pan menu + Back cạnh trái + PHIM đen) ===")
-ok("UIScreenEdgePanGestureRecognizer" in cvsrc and "edges == .right" in cvsrc
-   and "edges == .left" in cvsrc, "ContentView: edge-pan phải (menu) + trái (Back) gắn trên WINDOW")
-ok(cvsrc.count("cancelsTouchesInView = false") >= 2 and "delaysTouchesBegan = false" in cvsrc,
+print("\n=== T4.10 — Menu ẩn + gesture điều hướng (build 221) + PHIM giữ trạng thái ===")
+ok("@State private var showMenu = false" in cvsrc, "menu MẶC ĐỊNH ẩn khi mở app (fullscreen từ đầu)")
+ok("if showMenu" in cvsrc, "overlay chỉ nằm trong hierarchy khi hiện (ẩn = 0% chặn touch)")
+ok("guard !showingPlayer" in cvsrc, "menu không mở vô hình dưới sheet player (ẩn/hiện ổn định)")
+ok("guard !showMenu else { return }" in cvsrc, "toggle idempotent — không chớp ẩn/hiện 2 lần")
+ok("BinTVWindowGestures" in cvsrc and "window.addGestureRecognizer" in cvsrc,
+   "gesture gắn TRỰC TIẾP trên UIWindow (không cần tìm UITabBarController)")
+ok("BinTVScreenEdgePanRecognizer" in cvsrc and "installEdgePan(.right" in cvsrc
+   and "installEdgePan(.left" in cvsrc, "edge-pan phải (menu) + trái (Back) trên window")
+ok("cancelsTouchesInView = false" in cvsrc and "delaysTouchesBegan = false" in cvsrc,
    "edge-pan không cướp touch webview/video (cancelsTouchesInView/delaysTouchesBegan = false)")
-ok("onEdgeRight: { toggleOverlayMenu() }" in cvsrc, "vuốt cạnh phải vào → hiện overlay menu (cách 2 song song long-press)")
+ok("onEdgeRight: { toggleOverlayMenu() }" in cvsrc, "vuốt cạnh phải vào → hiện overlay menu (cách 2)")
+ok("onLongPress: { toggleOverlayMenu() }" in cvsrc, "giữ màn hình ≥0.35s → hiện overlay menu (cách 1)")
+ok("longPressAllowed: { !showMenu && !showingPlayer }" in cvsrc,
+   "long-press bị từ chối khi menu/player đang mở (không huỷ touch lên nút/video)")
+ok("shouldReceive touch" in cvsrc and "enclosingWebView(touch.view)" in cvsrc,
+   "delegate shouldReceive: nhận diện vùng WKWebView để nhường gesture")
+ok("allowsBackForwardNavigationGestures" in cvsrc,
+   "nhường swipe back/forward nội bộ của webview (không Back 2 lần/1 vuốt)")
+ok("candidate is UIControl || candidate is UITextInput" in cvsrc,
+   "nhường long-press hệ thống trong UIControl/ô nhập liệu (chọn/paste)")
+ok("shouldRecognizeSimultaneouslyWith" in cvsrc, "không chặn recognizer khác (scroll/pinch/video)")
 ok("handleBackGesture" in cvsrc and "final class BinTVBackRegistry" in cvsrc, "chuỗi Back + registry webview")
 back = cvsrc.split("private func handleBackGesture")[1].split("\n    }")[0]
-ok("if showMenu" in back and "showingPlayer" in back and "perform(tab: selectedTab)" in back,
-   "chuỗi Back đúng thứ tự: ẩn menu → đóng sheet player → webview goBack 1 bước")
-ok("guard !showingPlayer" in cvsrc, "menu không mở vô hình dưới sheet player (ẩn/hiện ổn định)")
-ok("@State private var showMenu = false" in cvsrc, "menu MẶC ĐỊNH ẩn khi mở app (fullscreen từ đầu)")
+ok("if showMenu" in back and "showingPlayer" in back and "perform(tab: selectedTab)" in back
+   and "tabHistory" in back,
+   "Back đúng thứ tự: ẩn menu → đóng sheet → webview goBack → lùi tab trước đó")
+ok("if tabHistory.count > 1" in back, "Back lùi đúng lịch sử tab, không thoát app khi còn màn hình trước")
+ok("không còn mức nào phía trước" in back, "root = NO-OP tuyệt đối (không thoát app)")
 pwsrc = open(os.path.join(ROOT, "BinTV", "Phim", "PhimWebView.swift"), encoding="utf-8").read()
 ok("webViewWebContentProcessDidTerminate" in pwsrc and "webView.reload()" in pwsrc,
    "PHIM root cause màn đen: delegate CHÍNH THỨC WebContent process terminate → reload phục hồi")
@@ -348,6 +416,21 @@ ok("BinTVBackRegistry.shared.register(tab: BinTVPage.phim.rawValue)" in pwsrc
 ok("webViewWebContentProcessDidTerminate" in mlsrc
    and "BinTVBackRegistry.shared.register(tab: BinTVPage.tube.rawValue)" in mlsrc,
    "TUBE: cùng lớp fix lifecycle webview + đăng ký Back (không đổi logic phát)")
+# --- [build 221] PHIM: root cause bị triệt tiêu tại nguồn + khôi phục đúng cách ---
+ok("mountedTabs.insert(tab)" in cvsrc, "chuyển tab KHÔNG gỡ trang khỏi hierarchy (webview không rời window)")
+ok("allowsHitTesting(selectedTab == page.rawValue)" in cvsrc,
+   "trang không chọn: vô hình + không nhận touch, nhưng VẪN ở trong hierarchy")
+ok(".onChange(of: isActive)" in pwsrc and "noteTabDidAppear()" in pwsrc,
+   "PHIM: hook hiện-lại-tab (repaint + khôi phục nếu trống), không reload bừa")
+ok("func restoreIfEmpty" in pwsrc and "webView.url == nil" in pwsrc and "restoreAttempts < 3" in pwsrc,
+   "PHIM: chỉ nạp lại khi webview thật sự trống — tối đa 3 lần, không reload vô hạn")
+ok("restoreAttempts = 0" in pwsrc and "didFinishNavigation" in pwsrc,
+   "PHIM: reset bộ đếm khi trang tải xong (cache còn dùng được → không reload)")
+ok("isActive: selectedTab == BinTVPage.phim.rawValue" in cvsrc
+   and "isActive: selectedTab == BinTVPage.tube.rawValue" in cvsrc,
+   "ContentView truyền cờ isActive cho PHIM + TUBE")
+ok("onSelect: { selectTab($0) }" in cvsrc and "func selectTab" in cvsrc,
+   "overlay menu chuyển trang qua selectTab (ghi lịch sử Back)")
 # --- xbuild.log: nhật ký hợp nhất toàn pipeline (fix 2026-09-12 vòng 2) ---
 ok("- name: Init xbuild.log" in yml and yml.index("- name: Init xbuild.log") < yml.index("- name: Detect Xcode project"),
    "bước Init xbuild.log chạy TRƯỚC Detect/Preflight — fail sớm vẫn có artifact log")
