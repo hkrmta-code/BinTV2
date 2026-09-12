@@ -92,8 +92,15 @@ struct ContentView: View {
         // Cơ chế CŨ giữ nguyên văn: (1) ẩn VĨNH VIỄN bottom tab bar của
         // UITabBarController (yêu cầu "xóa menu bar phía dưới"), (2) gắn
         // long-press global ≥0.35s → mở overlay menu.
+        // [2026-09-12] THÊM (3)+(4): edge-pan trên WINDOW — vuốt từ cạnh
+        // PHẢI vào = hiện menu (song song long-press), vuốt từ cạnh TRÁI
+        // sang = Back 1 bước (handleBackGesture). Gắn trên window để phủ
+        // cả sheet PlayerView; cancelsTouchesInView=false nên vuốt/scroll/
+        // điều khiển video không hề bị ảnh hưởng.
         .background(
-            TabChromeController(onLongPress: { toggleOverlayMenu() })
+            TabChromeController(onLongPress: { toggleOverlayMenu() },
+                                onEdgeRight: { toggleOverlayMenu() },
+                                onEdgeLeft: { handleBackGesture() })
                 .frame(width: 0, height: 0)
         )
         .onAppear {
@@ -134,11 +141,71 @@ struct ContentView: View {
     // IDEMPOTENT với trạng thái hiện tại: đang mở thì giữ nguyên (một lần
     // nhấn giữ có thể kích hoạt nhiều recognizer cùng lúc — global +
     // webview riêng — không muốn ẩn/hiện nhấp nháy 2 lần).
+    // [2026-09-12] THÊM guard !showingPlayer: khi sheet PlayerView đang
+    // phủ màn hình, overlay menu nằm DƯỚI sheet → mở ra cũng vô hình,
+    // dễ gây hiểu lầm "menu tự hiện"; chặn luôn cho ổn định (yêu cầu
+    // "tránh tự động xuất hiện ngoài ý muốn").
     // =================================================================
     private func toggleOverlayMenu() {
         guard !showMenu else { return }
+        guard !showingPlayer else { return }
         showMenu = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    // =================================================================
+    // BACK BẰNG VUỐT CẠNH TRÁI (2026-09-12) — đúng 1 bước, theo đúng thứ
+    // tự điều hướng, KHÔNG BAO GIỜ thoát app:
+    //   1) overlay menu đang hiện      → ẩn menu (back khỏi menu);
+    //   2) sheet PlayerView đang mở    → đóng sheet (back khỏi player);
+    //   3) webview tab hiện tại (TUBE/PHIM) còn lịch sử → goBack() 1 bước
+    //      (đăng ký qua BinTVBackRegistry — chính webview tự báo mình
+    //      còn canGoBack hay không, không đoán mò từ ngoài);
+    //   4) màn hình gốc, không còn gì để back → NO-OP tuyệt đối.
+    // Mỗi lần vuốt = tối đa 1 bước (recognizer .began fired 1 lần/swipe).
+    // =================================================================
+    private func handleBackGesture() {
+        if showMenu {
+            showMenu = false
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
+        if showingPlayer {
+            showingPlayer = false
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
+        if BinTVBackRegistry.shared.perform(tab: selectedTab) {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
+        // Root: không còn mức nào phía trước — cố tình KHÔNG làm gì
+        // (không dismiss tab, không suspend, không thoát app).
+    }
+}
+
+// MARK: - Back registry: webview tự đăng ký khả năng goBack theo tab
+
+/// Kênh liên lạc tối giản giữa ContentView (sở hữu chuỗi Back) và các
+/// WKWebView nằm sâu trong tab (TUBE/PHIM). Mỗi controller webview đăng
+/// ký MỘT closure trả về "tôi đã xử lý Back chưa" — chỉ goBack khi
+/// `canGoBack` thật, nên không bao giờ Back hụt hay lỗi oan.
+/// [2026-09-12] Thêm cùng gesture vuốt cạnh trái; không đụng logic phát
+/// video / tải trang hiện có của từng tab.
+final class BinTVBackRegistry {
+    static let shared = BinTVBackRegistry()
+    private var handlers: [Int: () -> Bool] = [:]
+    private let lock = NSLock()
+
+    func register(tab: Int, _ handler: @escaping () -> Bool) {
+        lock.lock(); defer { lock.unlock() }
+        handlers[tab] = handler
+    }
+
+    /// Trả về true nếu tab đó còn mức để back và đã back 1 bước.
+    func perform(tab: Int) -> Bool {
+        lock.lock(); let h = handlers[tab]; lock.unlock()
+        return h?() ?? false
     }
 }
 
@@ -180,9 +247,13 @@ final class BinTVMenuLongPressRecognizer: UILongPressGestureRecognizer {
 /// (revealTabMenu → toggle strip → toggleOverlayMenu).
 private struct TabChromeController: UIViewControllerRepresentable {
     var onLongPress: () -> Void
+    /// [2026-09-12] Vuốt từ cạnh PHẢI vào trong → hiện overlay menu.
+    var onEdgeRight: () -> Void
+    /// [2026-09-12] Vuốt từ cạnh TRÁI sang phải → Back đúng 1 bước.
+    var onEdgeLeft: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onLongPress: onLongPress)
+        Coordinator(onLongPress: onLongPress, onEdgeRight: onEdgeRight, onEdgeLeft: onEdgeLeft)
     }
 
     func makeUIViewController(context: Context) -> UIViewController {
@@ -191,15 +262,23 @@ private struct TabChromeController: UIViewControllerRepresentable {
 
     func updateUIViewController(_ vc: UIViewController, context: Context) {
         context.coordinator.onLongPress = onLongPress
+        context.coordinator.onEdgeRight = onEdgeRight
+        context.coordinator.onEdgeLeft = onEdgeLeft
         context.coordinator.apply(to: vc)
     }
 
     final class Coordinator: NSObject {
         var onLongPress: () -> Void
+        var onEdgeRight: () -> Void
+        var onEdgeLeft: () -> Void
         private var retries = 0
 
-        init(onLongPress: @escaping () -> Void) {
+        init(onLongPress: @escaping () -> Void,
+             onEdgeRight: @escaping () -> Void,
+             onEdgeLeft: @escaping () -> Void) {
             self.onLongPress = onLongPress
+            self.onEdgeRight = onEdgeRight
+            self.onEdgeLeft = onEdgeLeft
         }
 
         func apply(to vc: UIViewController) {
@@ -209,12 +288,7 @@ private struct TabChromeController: UIViewControllerRepresentable {
             }
             guard let tbc = responder as? UITabBarController else {
                 // Hierarchy chưa sẵn sàng — retry ngắn.
-                guard retries < 10 else { return }
-                retries += 1
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak vc] in
-                    guard let self = self, let vc = vc else { return }
-                    self.apply(to: vc)
-                }
+                scheduleRetry(vc)
                 return
             }
 
@@ -235,11 +309,67 @@ private struct TabChromeController: UIViewControllerRepresentable {
                 )
                 tbc.view.addGestureRecognizer(recognizer)
             }
+
+            // (3) [2026-09-12] EDGE-PAN trên WINDOW (không phải tbc.view):
+            //     window nằm TRÊN cùng chuỗi responder của cả window nên phủ
+            //     được cả sheet PlayerView (gắn ở tbc.view thì sheet chặn
+            //     touch). Window sẵn sàng MUỘN hơn tbc → retry như trên.
+            //     - .right: vuốt từ cạnh phải vào → hiện menu (cách 2 song
+            //       song long-press, theo yêu cầu 2026-09-12).
+            //     - .left : vuốt từ cạnh trái sang → Back 1 bước.
+            //     cancelsTouchesBegan=false + cancelsTouchesInView=false:
+            //     touch vẫn giao ngay cho webview/video/scroll; edge-pan chỉ
+            //     nhận diện khi ngón BẮT ĐẦU trong dải sát mép màn hình
+            //     (cùng triết lý interactive-pop của hệ thống) → thao tác
+            //     trong nội dung không bao giờ bị cướp.
+            guard let window = tbc.view.window else {
+                scheduleRetry(vc)
+                return
+            }
+            if !(window.gestureRecognizers?.contains {
+                    ($0 as? UIScreenEdgePanGestureRecognizer)?.edges == .right } ?? false) {
+                let right = UIScreenEdgePanGestureRecognizer(
+                    target: self, action: #selector(handleEdgeRight(_:)))
+                right.edges = .right
+                right.maximumNumberOfTouches = 1
+                right.cancelsTouchesInView = false
+                right.delaysTouchesBegan = false
+                window.addGestureRecognizer(right)
+            }
+            if !(window.gestureRecognizers?.contains {
+                    ($0 as? UIScreenEdgePanGestureRecognizer)?.edges == .left } ?? false) {
+                let left = UIScreenEdgePanGestureRecognizer(
+                    target: self, action: #selector(handleEdgeLeft(_:)))
+                left.edges = .left
+                left.maximumNumberOfTouches = 1
+                left.cancelsTouchesInView = false
+                left.delaysTouchesBegan = false
+                window.addGestureRecognizer(left)
+            }
+        }
+
+        private func scheduleRetry(_ vc: UIViewController) {
+            guard retries < 10 else { return }
+            retries += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak vc] in
+                guard let self = self, let vc = vc else { return }
+                self.apply(to: vc)
+            }
         }
 
         @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
             guard recognizer.state == .began else { return }
             onLongPress()
+        }
+
+        @objc private func handleEdgeRight(_ recognizer: UIScreenEdgePanGestureRecognizer) {
+            guard recognizer.state == .began else { return }
+            onEdgeRight()
+        }
+
+        @objc private func handleEdgeLeft(_ recognizer: UIScreenEdgePanGestureRecognizer) {
+            guard recognizer.state == .began else { return }
+            onEdgeLeft()
         }
     }
 }

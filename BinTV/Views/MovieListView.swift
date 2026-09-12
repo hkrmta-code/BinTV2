@@ -96,6 +96,9 @@ struct MovieListView: View {
             // Audio session để âm thanh tiếp tục khi app ẩn / khóa màn hình
             // (kết hợp UIBackgroundModes: audio đã có sẵn trong Info.plist).
             browser.configureAudioSession()
+            // [2026-09-12] repaint layer khi tab hiện lại (chống khung hình
+            // stale/tối); KHÔNG reload — trạng thái xem được giữ nguyên.
+            browser.noteTabDidAppear()
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
@@ -371,6 +374,14 @@ final class YouTubeBrowser: NSObject, ObservableObject, WKNavigationDelegate, WK
         // đã phát, tức rất lâu sau init).
         configuration.userContentController.add(self, name: "bintv")
         webView.navigationDelegate = self
+        // [2026-09-12] Chuỗi Back toàn app (vuốt cạnh trái): TUBE chỉ xử lý
+        // khi webview YouTube còn lịch sử (canGoBack) — trả false thì
+        // ContentView coi như đã ở root và KHÔNG làm gì (không thoát app).
+        BinTVBackRegistry.shared.register(tab: BinTVPage.tube.rawValue) { [weak self] in
+            guard let wv = self?.webView, wv.canGoBack else { return false }
+            wv.goBack()
+            return true
+        }
         webView.uiDelegate = self
         // Vuốt rìa màn hình = back / next (thay thế nút trình duyệt).
         webView.allowsBackForwardNavigationGestures = true
@@ -626,6 +637,21 @@ extension YouTubeBrowser {
     /// - /shorts/...    → SHORT FEED: không auto-fullscreen, không nút nổi
     ///   — giữ nguyên layout feed để vuốt lên/xuống chuyển video thoải mái.
     /// <video> mới → gắn lại hooks và cho phép auto-fullscreen lại.
+    // [FIX 2026-09-12 — cùng lớp lỗi "màn hình đen khi quay lại tab" của
+    // PHIM] WebContent process bị hệ thống kết thúc (áp lực bộ nhớ khi tab
+    // ẩn) → WKWebView chỉ còn layer đen và không tự hồi. Cơ chế CHÍNH THỨC
+    // của Apple: reload trong delegate này. Chỉ chạy KHI process chết —
+    // chuyển tab bình thường không reload, giữ nguyên trạng thái xem.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        webView.reload()
+    }
+
+    /// [2026-09-12] Repaint layer khi tab hiện lại — không reload, không
+    /// mất trạng thái (chống khung hình stale/tối sau khi gắn lại window).
+    func noteTabDidAppear() {
+        webView.setNeedsDisplay()
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let url = webView.url
         let isWatch = (url?.path.hasPrefix("/watch") ?? false)
