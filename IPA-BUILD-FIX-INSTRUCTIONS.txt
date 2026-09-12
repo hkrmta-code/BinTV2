@@ -1,0 +1,40 @@
+BIN TV iOS — IPA BUILD FIX (2026-09-12) — phan tich tu xbuild.log that
+========================================================================
+Run duoc phan tich: https://github.com/Binkyo2013/BinTV1/actions/runs/34690803983
+Loi: Preflight FAIL — "3 file .swift/.m KHONG nam trong Compile Sources":
+     BinTV/Views/BrowserTabBar.swift, BrowserTabs.swift, NewTabPageView.swift
+Nguyen nhan: repo da co pbxproj build 219 (dung) nhung 3 file khai tu cua
+build 218 VAN CON tren repo (zip khong bieu dien duoc thao tac xoa).
+
+CACH AP DUNG (100% upload, KHONG can xoa file thu cong):
+1. UPLOAD/GHI DE 9 file trong zip nay len repo (giu nguyen duong dan):
+   - BinTV/Views/BrowserTabs.swift        <- TOMBSTONE (chi comment + '// ci-skip:')
+   - BinTV/Views/BrowserTabBar.swift      <- TOMBSTONE
+   - BinTV/Views/NewTabPageView.swift     <- TOMBSTONE
+     (3 file nay DE LEN file cu — code chet bien mat, preflight bo qua CO
+      CHU DICH va in minh bach "bo qua co chu dich" ra xbuild.log)
+   - .github/workflows/build-ipa.yml      <- fix 'set +e' (marker [STEP END]
+     se duoc ghi ca khi step fail; RC that van giu nguyen)
+   - tests/mock-e2e/test_project_consistency.py + README.md (326 assertion)
+   - BAOCAO-KYTHUAT-FIX-2026-09-12.md (Addendum 6), README.md
+2. Push/commit -> Actions tu chay (hoac Run workflow).
+
+KY VONG LAN CHAY KE TIEP:
+- Preflight XANH: "Compile Sources : 16 entry | file nguon tren dia : 20"
+  + 4 dong "bo qua co chu dich" (AppDelegate + 3 tombstone) + [STEP END] exit=0
+- Job di tiep: Select Xcode -> Build .app (xcodebuild that, log day du vao
+  xbuild.log) -> Verify .app -> Package .ipa -> Verify .ipa
+- Artifact: 'xbuild-log' (LUON co) + '<app>-trollstore-unsigned' (khi thanh cong)
+
+TUY CHON (khong bat buoc): xoa han 3 file tombstone khoi repo (GitHub UI:
+mo file -> thung rac -> Commit). Build khong doi — tombstone khong chua code.
+
+TRUNG THUC:
+- Sandbox khong co macOS/Xcode: xcodebuild/archive/IPA = NOT VERIFIED cho
+  toi khi run ke tiep chay xanh. Neu build that bai, tai artifact 'xbuild-log'
+  -> file xbuild.log gio chua TOAN BO output compiler + error dump, gui lai
+  de phan tich tiep.
+- Khong can bat ky Secret nao: pipeline unsigned TrollStore (CODE_SIGNING_
+  ALLOWED=NO) la cau hinh SAN PHAM co y (IPA khong ky de cai qua TrollStore),
+  khong phai thu thuat bao xanh — .ipa that su duoc dong goi va kiem tra
+  (Mach-O arm64/arm64e, platform iOS, cau truc Payload/) truoc khi upload.

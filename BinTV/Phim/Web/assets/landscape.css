@@ -1,0 +1,205 @@
+/* =====================================================
+   PHIM - LANDSCAPE OVERRIDE (BinTV iOS - chế độ TV)
+   [BinTV iOS 2026-09]
+
+   Chỉ được nạp khi URL có ?android=phone&ios=landscape (app BinTV iOS
+   chạy chế độ TV: màn hình LUÔN ngang). Nạp SAU phone.css trong
+   <head> -> override cascade (cùng cụ thể, stylesheet sau thắng).
+
+   Mục tiêu (iPhone 14 Pro Max landscape: viewport ~932x430 CSS px):
+   - Tận dụng TOÀN BỘ chiều ngang: lưới poster 6 cột (poster 16:9 thap).
+   - Header compact 1 hàng; sidebar danh mục hẹp.
+   - Dialog chọn tập 8 nút/hàng; dialog lọc phim ngang.
+   - Padding env(safe-area-inset-*) (viewport-fit=cover) -> nội dung
+     KHÔNG đặt vào góc Dynamic Island / camera.
+   - KHÔNG đổi class / DOM / logic — chỉ override kích thước.
+
+   Công thức flex (để N cột vừa khít 100%):
+     flex-basis = calc(100%/N - tổng margin ngang 1 card).
+   ===================================================== */
+
+/* ---------- TOP SAFE AREA (status bar: giờ/pin/Dynamic Island) ----------
+   Trên LANDSCAPE, status bar iPhone KHÔNG nằm trong safe area
+   (safeArea.top = 0) và PhimView full-bleed (.ignoresSafeArea) -> nếu
+   không xử lý, web content đè lên giờ/pin/Dynamic Island.
+   Cách sửa: PhimController (Swift) inject CHIỀU CAO STATUS BAR THẬT
+   (statusBarManager.statusBarFrame.height — giá trị system theo thiết bị
+   + orientation, KHÔNG phải số hard-code) vào biến CSS
+   --bintv-status-bar-h. Fallback 21px chỉ dùng khi JS chưa kịp chạy.
+   Cạnh trái/phải (góc Dynamic Island): env(safe-area-inset-*) do
+   WebKit tự tính (viewport-fit=cover). ---------- */
+#bintv-movie-browser {
+    padding-top: var(--bintv-status-bar-h, 21px);
+}
+.movie-player-overlay {
+    padding: calc(16px + var(--bintv-status-bar-h, 21px))
+            calc(28px + env(safe-area-inset-right, 0px))
+            48px
+            calc(28px + env(safe-area-inset-left, 0px));
+}
+
+/* ---------- Header: compact 1 hàng, né safe area cạnh ---------- */
+.movie-browser-header {
+    height: 52px;
+    padding: 6px calc(14px + env(safe-area-inset-right, 0px))
+             6px calc(14px + env(safe-area-inset-left, 0px));
+    gap: 10px;
+}
+.movie-browser-title { font-size: 18px; }
+.movie-browser-catalog-title { font-size: 13px; }
+.movie-browser-body { height: calc(100% - 52px); }
+
+/* ---------- Sidebar danh mục: hẹp nhất có thể đọc ---------- */
+.movie-catalogs {
+    flex: 0 0 118px;
+    width: 118px;
+    padding: 8px 6px;
+}
+.movie-catalog-row {
+    min-height: 38px;
+    margin: 3px 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+.movie-catalog-row.selected { font-weight: 700; }
+.movie-catalog-group-title {
+    margin: 10px 4px 3px;
+    padding: 0 6px;
+    font-size: 11px;
+    letter-spacing: .5px;
+}
+
+/* ---------- Nội dung + status ---------- */
+.movie-content {
+    padding: 28px calc(8px + env(safe-area-inset-right, 0px))
+             8px calc(8px + env(safe-area-inset-left, 0px));
+}
+.movie-status { left: 10px; right: 10px; top: 6px; font-size: 12px; }
+
+/* ---------- Lưới thẻ phim: 6 cột, poster 16:9 (thẻ thấp).
+   (932px - 118px sidebar) ≈ 800px nội dung -> 6 cột x ~125px.
+   flex-basis = calc(16.66% - 12px) + margin 0 6px 10px = vừa khít 100%. ---------- */
+.movie-grid { padding: 4px 2px 18px; }
+.movie-card {
+    flex: 0 0 calc(16.66% - 12px);
+    margin: 0 6px 10px;
+    border-width: 2px;
+    border-radius: 9px;
+}
+.movie-card-poster {
+    aspect-ratio: 16 / 9;
+    border-radius: 7px;
+}
+.movie-card::after { height: 44px; }
+.movie-card-name { bottom: 19px; font-size: 11px; }
+.movie-card-meta { bottom: 6px; font-size: 10px; }
+.movie-skeleton-name { bottom: 19px; width: 70%; }
+.movie-skeleton-meta { bottom: 6px; width: 45%; }
+.movie-card:active {
+    border-color: #fff;
+    background: rgba(255, 255, 255, .18);
+}
+
+/* ---------- Nút lọc / tìm kiếm trong header: nhỏ gọn ---------- */
+.movie-filter-bar { gap: 6px; }
+.movie-filter-button {
+    min-width: 62px;
+    height: 32px;
+    padding: 0 9px;
+    border-radius: 8px;
+    font-size: 12px;
+}
+.movie-search-button {
+    min-width: 86px;
+    height: 32px;
+    padding: 0 9px;
+    gap: 5px;
+    border-radius: 8px;
+    font-size: 12px;
+}
+.movie-search-button-mic { font-size: 13px; }
+
+/* ---------- Dialog chọn tập: NGANG (8 nút/hàng).
+   flex-basis = calc(12.5% - 8px) + margin 4px = vừa khít 100%. ---------- */
+.movie-episodes-dialog {
+    width: 92vw;
+    max-width: 880px;
+    max-height: 88vh;
+    padding: 14px 18px;
+    border-radius: 16px;
+}
+.movie-episodes-title { margin-bottom: 10px; font-size: 18px; }
+.movie-episodes-list { max-height: 64vh; }
+.movie-episode-button {
+    flex: 0 0 calc(12.5% - 8px);
+    min-height: 42px;
+    margin: 4px;
+    padding: 10px 6px;
+    border-radius: 8px;
+    font-size: 14px;
+}
+.movie-episodes-help { margin-top: 10px; font-size: 12px; }
+
+/* ---------- Dialog lọc phim: ngang ---------- */
+.movie-filter-menu-dialog {
+    width: 92vw;
+    max-width: 780px;
+    max-height: 86vh;
+    padding: 16px;
+    border-radius: 16px;
+}
+.movie-filter-menu-title { margin-bottom: 12px; font-size: 20px; }
+.movie-filter-menu-help { margin-top: 10px; font-size: 12px; }
+
+/* ---------- Dialog tìm kiếm: giữ cỡ phone (đã hợp lý) ---------- */
+.movie-search-dialog { max-width: 640px; }
+
+/* ---------- Player: title/status compact, timeline trải ngang ---------- */
+.movie-player-title { max-width: 80vw; font-size: 17px; }
+.movie-player-status { margin-top: 2px; font-size: 13px; }
+.movie-subtitle-text {
+    left: 4%;
+    right: 4%;
+    bottom: 64px;
+    font-size: 22px;
+    line-height: 1.25;
+}
+
+/* ---------- Timeline tua: trải ngang gần đáy ---------- */
+.movie-seek-timeline {
+    left: 20px;
+    right: 20px;
+    bottom: 14px;
+    padding: 10px 14px 12px;
+    border-radius: 12px;
+}
+.movie-seek-timeline-times { margin-bottom: 6px; font-size: 14px; }
+.movie-seek-timeline-track { height: 10px; }
+.movie-seek-timeline-thumb { width: 20px; height: 20px; margin-left: -10px; margin-top: -10px; }
+
+/* ---------- Menu phụ đề / danh sách tập trong player: ngang ---------- */
+.movie-subtitle-dialog {
+    width: 92vw;
+    max-width: 780px;
+    max-height: 84vh;
+    padding: 16px;
+    border-radius: 14px;
+}
+.movie-player-episodes { padding: 0 3vw 4vh; }
+.movie-player-episodes-dialog {
+    max-width: 780px;
+    max-height: 260px;
+    padding: 14px 16px;
+    border-radius: 14px;
+}
+
+/* ---------- Toast ---------- */
+#bintv-toast {
+    left: 50%;
+    bottom: 58px;
+    max-width: 88vw;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+}
