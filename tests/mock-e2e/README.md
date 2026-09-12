@@ -39,10 +39,22 @@ node run_all.js          # chạy cả 4 suite; exit 0 = tất cả pass
    bằng `node --check` (T4) — giá trị thật của nó là log `[PHIM_DEBUG]` khi
    chạy trên máy thật để đối chiếu chuỗi sự kiện `loadstart→canplay→playing`.
 
-## Kết quả lần chạy cuối (sandbox, 2026-09-12)
+## Kết quả lần chạy cuối (sandbox, 2026-09-12 — sau Fix UI build 219)
 
 - T1: **40/40 PASS** — chuỗi bootstrap→stream→wrap bằng hàm app.js thật.
 - T2: **55/55 PASS** — thuật toán rewrite m3u8 (port Swift).
 - T3: **53/53 PASS** — E2E live HTTP, header gate 403/Referer vượt qua,
   bytes nguyên vẹn, redirect bọc kín, Range/206, HEAD.
-- T4: **96/96 PASS** — nhất quán project, sẵn sàng cho GitHub Actions.
+- T4: **190/190 PASS** — nhất quán project + T4.4b (regression guard lỗi
+  CI `if let error = error`) + T4.8 viết lại cho build 219 (Fullscreen +
+  Long-press Overlay Menu: khai tử sạch BrowserTabBar/NTP/BrowserTabs
+  khỏi đĩa lẫn pbxproj, overlay blur icon-only, gesture plumbing nguyên
+  văn, orientation/playback không bị đụng) + **T4.9 (Preflight CI gate:
+  check xuôi/ngược disk↔Compile Sources, hướng sửa actionable, cấm
+  `exit 0` che lỗi, scheme↔target khớp, canonical ghost-free) + 4
+  assertion xbuild.log (Init trước Preflight, một log hợp nhất duy nhất,
+  mọi step tee -a, artifact `xbuild-log` if: always()) + tombstone ci-skip
+  cho 3 file khai tử (whitelist chặt T4.1 + mô phỏng trọn Preflight 2.1:
+  missing = 0 trên canonical)**.
+- Tổng: **338/338 PASS** (T4.9 guard runner self-hosted; T4.10 guard nav
+  gestures 2026-09-12 + fix PHIM màn đen).
