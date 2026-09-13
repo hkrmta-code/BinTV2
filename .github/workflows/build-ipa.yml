@@ -100,13 +100,6 @@ on:
           - macos-15
           - self-hosted
 
-  push:
-    branches:
-      - main
-      - master
-    tags:
-      - v*
-
 permissions:
   contents: read
 
