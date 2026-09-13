@@ -2557,6 +2557,20 @@
         var finished = false;
         var timer = null;
         var isHls = /\.m3u8(?:\?|$)/i.test(url);
+        // [build 229] ĐI QUA /proxy: XHR trực tiếp tới host KHÁC ORIGIN bị
+        // CORS chặn → mọi kênh bị kết luận "chết" oan (và bị lọc khỏi danh
+        // sách). /proxy nằm cùng origin (http://127.0.0.1:PORT) nên XHR luôn
+        // hợp lệ; server fetch hộ rồi trả nguyên nội dung.
+        var requestUrl = url;
+        try {
+            var currentOrigin = (window.location && window.location.origin) ? window.location.origin : "";
+            var probeAnchor = document.createElement("a");
+            probeAnchor.href = url;
+            var urlOrigin = probeAnchor.origin || "";
+            if (currentOrigin && urlOrigin && urlOrigin !== currentOrigin && url.indexOf("/proxy?url=") === -1) {
+                requestUrl = currentOrigin.replace(/\/+$/, "") + "/proxy?url=" + encodeURIComponent(url);
+            }
+        } catch (originError) { requestUrl = url; }
         function finish(ok) {
             if (finished) return;
             finished = true;
@@ -2572,7 +2586,7 @@
         xhr.onerror = function () { finish(false); };
         xhr.ontimeout = function () { finish(false); };
         try {
-            xhr.open(isHls ? "GET" : "HEAD", url, true);
+            xhr.open(isHls ? "GET" : "HEAD", requestUrl, true);
             xhr.timeout = MOVIE_TV_VALIDATION_TIMEOUT;
             timer = setTimeout(function () { try { xhr.abort(); } catch (e) {} finish(false); }, MOVIE_TV_VALIDATION_TIMEOUT + 300);
             xhr.send();
@@ -4667,6 +4681,160 @@
         return "Không tìm thấy nguồn phát tương thích (" + list.length + " nguồn, không nguồn nào phát được trên iPhone)";
     }
 
+    // =================================================================
+    // [build 230] CẤU HÌNH ADDON THEO CHUẨN STREMIO (debrid / TorBox...)
+    // Addon Stremio nhận cấu hình QUA transport URL (manifest.config khai
+    // báo các khoá). Ví dụ VipTorrent khai `torbox` (mật khẩu, không bắt
+    // buộc): khi có khoá, addon trả THÊM các stream có `url` (link phát
+    // trực tiếp) thay vì chỉ torrent. Toàn bộ đi theo chuẩn → không
+    // hard-code tên khoá/addon nào.
+    // =================================================================
+    var MOVIE_ADDON_CONFIG_KEY = "bintvAddonConfigV1";
+
+    function readMovieAddonConfig() {
+        try {
+            var raw = window.localStorage ? window.localStorage.getItem(MOVIE_ADDON_CONFIG_KEY) : null;
+            if (!raw) return {};
+            var parsed = JSON.parse(raw);
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (e) { return {}; }
+    }
+
+    function writeMovieAddonConfig(all) {
+        try { if (window.localStorage) window.localStorage.setItem(MOVIE_ADDON_CONFIG_KEY, JSON.stringify(all || {})); } catch (e) {}
+    }
+
+    function movieAddonConfigKey(addon) {
+        return String((addon && (addon.id || addon.baseUrl)) || "addon");
+    }
+
+    function getMovieAddonConfigValues(addon) {
+        var all = readMovieAddonConfig();
+        var values = all[movieAddonConfigKey(addon)];
+        return values && typeof values === "object" ? values : null;
+    }
+
+    /// Áp dụng cấu hình đã lưu cho từng addon (nạp lại manifest đã cấu hình).
+    function applyMovieAddonConfigurations(index) {
+        if (!window.Stremio) return;
+        var list = movieAddons || [];
+        if (index >= list.length) return;
+        var addon = list[index];
+        var next = function () { applyMovieAddonConfigurations(index + 1); };
+        var values = getMovieAddonConfigValues(addon);
+        if (!values || !Object.keys(values).length) { next(); return; }
+        configureMovieAddon(addon, values, next);
+    }
+
+    /// Dựng lại addon từ transport URL ĐÃ CẤU HÌNH (gộp config vào URL).
+    function configureMovieAddon(addon, values, done) {
+        var finish = function () { if (done) done(); };
+        if (!window.Stremio || !addon) { finish(); return; }
+        var manifestUrl = window.Stremio.buildConfiguredUrl(addon.baseUrl, values);
+        requestJson(manifestUrl, MOVIE_REQUEST_TIMEOUT, function (manifest) {
+            if (window.Stremio.isManifest(manifest)) {
+                var configured = window.Stremio.createAddon(
+                    window.Stremio.baseUrlFromManifestUrl(manifestUrl), manifest);
+                var oldBase = addon.baseUrl;
+                for (var i = 0; i < movieAddons.length; i++) {
+                    if (movieAddons[i] === addon || movieAddons[i].baseUrl === oldBase) { movieAddons[i] = configured; break; }
+                }
+                if (movieBaseUrl === oldBase) movieBaseUrl = configured.baseUrl;
+                for (var c = 0; c < movieCatalogs.length; c++) {
+                    if (movieCatalogs[c] && movieCatalogs[c]._addon === oldBase) movieCatalogs[c]._addon = configured.baseUrl;
+                }
+                try { phimLog("addon đã áp dụng cấu hình: " + (configured.name || oldBase)); } catch (e) {}
+            }
+            finish();
+        }, finish);
+    }
+
+    /// Khi nguồn CHỈ có torrent: nếu addon có trường cấu hình chưa nhập →
+    /// mời người dùng nhập (hiện 1 lần, không chặn luồng khác).
+    function offerMovieAddonConfigForTorrent(classified, type, id, title, subtitleContext) {
+        if (!window.Stremio || !movieAddons.length) return false;
+        var hasTorrent = false;
+        for (var i = 0; i < classified.length; i++) if (classified[i] && classified[i].kind === "torrent") { hasTorrent = true; break; }
+        if (!hasTorrent) return false;
+        for (var a = 0; a < movieAddons.length; a++) {
+            var addon = movieAddons[a];
+            var fields = window.Stremio.getConfigFields(addon.manifest);
+            if (!fields.length) continue;
+            var saved = getMovieAddonConfigValues(addon) || {};
+            var missing = null;
+            for (var f = 0; f < fields.length; f++) {
+                if (fields[f] && fields[f].key && !saved[fields[f].key]) { missing = fields[f]; break; }
+            }
+            if (!missing) continue;
+            return openMovieAddonConfigDialog(addon, missing, function () {
+                loadMovieStreams(type, id, title, subtitleContext);
+            });
+        }
+        return false;
+    }
+
+    /// Hộp nhập khoá cấu hình (tự tạo DOM, không phụ thuộc CSS/file nào).
+    function openMovieAddonConfigDialog(addon, field, onSaved) {
+        try {
+            var old = document.getElementById("bintv-movie-addon-config");
+            if (old && old.parentNode) old.parentNode.removeChild(old);
+            var wrap = document.createElement("div");
+            wrap.id = "bintv-movie-addon-config";
+            wrap.style.cssText = "position:fixed;inset:0;z-index:12000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.72)";
+            var box = document.createElement("div");
+            box.style.cssText = "width:min(560px,86vw);background:#15151c;border:1px solid #2c2c38;border-radius:14px;padding:18px;color:#f2f2f7;font-family:-apple-system,system-ui,sans-serif";
+            var heading = document.createElement("div");
+            heading.style.cssText = "font-size:17px;font-weight:600;margin-bottom:6px";
+            heading.textContent = (addon && addon.name ? addon.name : "Nguồn phim") + " cần cấu hình";
+            var desc = document.createElement("div");
+            desc.style.cssText = "font-size:13px;line-height:1.45;color:#b9b9c6;margin-bottom:12px";
+            desc.textContent = "Nguồn này hiện CHỈ có torrent (P2P) — iPhone không thể phát trực tiếp. " +
+                (field && field.description ? String(field.description) + " " : "") +
+                "Nhập " + String((field && (field.title || field.key)) || "khoá API") + " để nhận link phát trực tiếp (HLS/MP4).";
+            var input = document.createElement("input");
+            input.type = "text";
+            input.autocomplete = "off";
+            input.spellcheck = false;
+            input.placeholder = String((field && (field.title || field.key)) || "API key");
+            input.style.cssText = "width:100%;box-sizing:border-box;background:#0e0e14;border:1px solid #343442;border-radius:9px;color:#fff;padding:11px 12px;font-size:15px;outline:none";
+            var actions = document.createElement("div");
+            actions.style.cssText = "display:flex;gap:10px;justify-content:flex-end;margin-top:14px";
+            var cancel = document.createElement("button");
+            cancel.textContent = "Để sau";
+            cancel.style.cssText = "background:#2a2a36;border:0;border-radius:9px;color:#e7e7ef;padding:10px 16px;font-size:14px";
+            var save = document.createElement("button");
+            save.textContent = "Lưu & thử lại";
+            save.style.cssText = "background:#ff7a1a;border:0;border-radius:9px;color:#14141a;font-weight:600;padding:10px 16px;font-size:14px";
+            actions.appendChild(cancel);
+            actions.appendChild(save);
+            box.appendChild(heading);
+            box.appendChild(desc);
+            box.appendChild(input);
+            box.appendChild(actions);
+            wrap.appendChild(box);
+            (document.body || document.documentElement).appendChild(wrap);
+            function close() { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }
+            cancel.addEventListener("click", close);
+            save.addEventListener("click", function () {
+                var value = String(input.value || "").replace(/^\s+|\s+$/g, "");
+                if (!value) { close(); return; }
+                var values = getMovieAddonConfigValues(addon) || {};
+                var key = (field && field.key) || "apiKey";
+                values[key] = value;
+                var all = readMovieAddonConfig();
+                all[movieAddonConfigKey(addon)] = values;
+                writeMovieAddonConfig(all);
+                close();
+                showMovieStatus("Đang áp dụng cấu hình nguồn…", false);
+                configureMovieAddon(addon, values, function () { if (onSaved) onSaved(); });
+            });
+            try { input.focus(); } catch (focusError) {}
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function loadMovieStreams(type, id, title, subtitleContext) {
         showMovieStatus("Đang tìm nguồn phát…", false);
         fetchMovieStreamsShared(type, id, function (streams) {
@@ -4713,6 +4881,9 @@
             }
             clearMovieTvPlaybackFallback();
             if (!validStreams.length) {
+                // [build 230] Chỉ có torrent + addon hỗ trợ cấu hình debrid
+                // → mời nhập khoá (chuẩn Stremio), rồi thử lại tự động.
+                if (offerMovieAddonConfigForTorrent(classified, type, id, title, subtitleContext)) return;
                 moviePlayerEpisodeSwitchInProgress = false;
                 var reason = describeUnplayableStreams(classified);
                 if (moviePlayerOpen) updateMoviePlayerStatus(reason);
@@ -6103,6 +6274,7 @@
                 if (!addons.length) { finishFailure(new Error("Không nạp được addon Phim nào")); return; }
                 movieAddons = addons.slice();
                 movieBaseUrl = addons[0].baseUrl;                 // tương thích ngược
+                applyMovieAddonConfigurations(0);                 // debrid/config đã lưu
                 var merged = mergeMovieAddonManifests(addons);    // gộp catalog mọi nguồn
                 if (!merged.catalogs || !merged.catalogs.length) { finishFailure(new Error("Manifest Phim không hợp lệ")); return; }
                 try { phimLog("fetchMovieBootstrapShared: merged catalogs", { count: merged.catalogs.length }); } catch (e) {}

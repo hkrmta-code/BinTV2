@@ -458,6 +458,64 @@
         }
     }
 
+    // ------------------------------------------------------------------
+    // 7) CẤU HÌNH ADDON (chuẩn Stremio: config nằm TRONG transport URL)
+    //    Dạng tổng quát: <host>/<mã-hoá-JSON-của-config>/manifest.json
+    //    với manifest.config = [{key:<tên khoá>, type:"password", ...}].
+    //    → thêm/bớt khoá là app tự dựng lại URL, KHÔNG hard-code tên khoá nào.
+    // ------------------------------------------------------------------
+
+    /// Đọc object config đã nằm sẵn trong URL (nếu có).
+    function parseTransportConfig(baseUrl) {
+        try {
+            var parts = trim(baseUrl).split("/");
+            for (var i = parts.length - 1; i >= 0; i--) {
+                var seg = parts[i];
+                if (!seg) continue;
+                var decoded = decodeURIComponent(seg);
+                if (!decoded || decoded.charAt(0) !== "{") continue;
+                var obj = JSON.parse(decoded);
+                if (isObject(obj)) return { segment: seg, values: obj };
+            }
+        } catch (e) { /* không có config trong URL */ }
+        return { segment: "", values: {} };
+    }
+
+    /// Gộp `config` vào transport URL → trả về URL manifest đã cấu hình.
+    function buildConfiguredUrl(baseUrl, config) {
+        var base = baseUrlUrl(baseUrl);
+        var parsed = parseTransportConfig(base);
+        var merged = {};
+        var key;
+        for (key in parsed.values) if (Object.prototype.hasOwnProperty.call(parsed.values, key)) merged[key] = parsed.values[key];
+        for (key in config) {
+            if (!Object.prototype.hasOwnProperty.call(config, key)) continue;
+            var value = config[key];
+            if (value === null || value === undefined || trim(value) === "") delete merged[key];
+            else merged[key] = value;
+        }
+        var encoded = encodeURIComponent(JSON.stringify(merged));
+        if (parsed.segment) {
+            var idx = base.lastIndexOf(parsed.segment);
+            if (idx >= 0) base = base.substring(0, idx) + encoded + base.substring(idx + parsed.segment.length);
+        } else {
+            base = base + "/" + encoded;
+        }
+        return base + "/manifest.json";
+    }
+
+    /// Các trường cấu hình addon KHAI BÁO (manifest.config — chuẩn Stremio).
+    function getConfigFields(manifest) {
+        var cfg = manifest && manifest.config;
+        if (!Array.isArray(cfg)) return [];
+        var out = [];
+        for (var i = 0; i < cfg.length; i++) {
+            var f = cfg[i];
+            if (f && f.key) out.push(f);
+        }
+        return out;
+    }
+
     return {
         KIND: KIND,
         extractManifestUrls: extractManifestUrls,
@@ -475,6 +533,9 @@
         pickPlayable: pickPlayable,
         magnetFromStream: magnetFromStream,
         headersFromStream: headersFromStream,
+        parseTransportConfig: parseTransportConfig,
+        buildConfiguredUrl: buildConfiguredUrl,
+        getConfigFields: getConfigFields,
         loadAddons: loadAddons,
         resolveStreams: resolveStreams
     };
