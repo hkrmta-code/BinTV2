@@ -41,9 +41,16 @@ final class AVPlayerManager: ObservableObject {
 
     var isPlaying: Bool { state == .playing }
 
-    /// Chỉnh chu FIT ⇄ FILL (nút trên thanh điều khiển player).
+    /// Chỉnh chu FIT ⇄ FILL.
     func toggleFitFill() {
         videoGravity = (videoGravity == .resizeAspect) ? .resizeAspectFill : .resizeAspect
+    }
+
+    /// Đặt TRỰC TIẾP chế độ xem — dùng cho pinch 2 ngón (FIT → FILL → FULL).
+    /// Cùng một nơi lưu trạng thái với `toggleFitFill` nên nút và cử chỉ
+    /// pinch KHÔNG BAO GIỜ lệch nhau.
+    func setGravity(_ newValue: AVLayerVideoGravity) {
+        videoGravity = newValue
     }
 
     private var currentItem: AVPlayerItem?

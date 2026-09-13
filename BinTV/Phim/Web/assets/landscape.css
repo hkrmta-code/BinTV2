@@ -71,19 +71,29 @@
 }
 
 /* ---------- Nội dung + status ---------- */
+/* [BinTV 2026-09-13 build 224] LƯỚI THẺ PHIM TRÀN 2 VIỀN: bỏ padding ngang
+   (8px) của vùng nội dung — thẻ phim chạm sát mép trái/phải màn hình, chỉ
+   chừa env(safe-area-inset-*) để né góc Dynamic Island. ---------- */
 .movie-content {
-    padding: 28px calc(8px + env(safe-area-inset-right, 0px))
-             8px calc(8px + env(safe-area-inset-left, 0px));
+    padding: 28px env(safe-area-inset-right, 0px)
+             8px env(safe-area-inset-left, 0px);
 }
 .movie-status { left: 10px; right: 10px; top: 6px; font-size: 12px; }
 
-/* ---------- Lưới thẻ phim: 6 cột, poster 16:9 (thẻ thấp).
-   (932px - 118px sidebar) ≈ 800px nội dung -> 6 cột x ~125px.
-   flex-basis = calc(16.66% - 12px) + margin 0 6px 10px = vừa khít 100%. ---------- */
-.movie-grid { padding: 4px 2px 18px; }
+/* ---------- Lưới thẻ phim: 4 cột (giảm từ 6), poster GIỮ đúng 16/9.
+   [BinTV 2026-09-13 build 224] Theo yêu cầu:
+     • GIẢM số thẻ/hàng: 6 → 4 → thẻ RỘNG hơn (~190px thay vì ~125px).
+     • Poster vẫn đúng tỉ lệ 16/9 (không crop, không méo).
+     • Tên phim + năm sản xuất: TRẢ VỀ LUỒNG BÌNH THƯỜNG — nằm DƯỚI ảnh,
+       không còn phủ lên poster (xoá cả gradient ::after từng làm nền cho
+       chữ) → ảnh/poster KHÔNG bị che nội dung.
+   Kết quả: chiều cao thẻ ~160px so với ~70px trước (≈ gấp 2,3 lần), chữ
+   to và đọc được rõ hơn trên TV.
+   (932px - 118px sidebar) ≈ 814px nội dung -> 4 cột x ~190px. ---------- */
+.movie-grid { padding: 4px 0 18px; }
 .movie-card {
-    flex: 0 0 calc(16.66% - 12px);
-    margin: 0 6px 10px;
+    flex: 0 0 calc(25% - 12px);
+    margin: 0 6px 14px;
     border-width: 2px;
     border-radius: 9px;
 }
@@ -91,11 +101,48 @@
     aspect-ratio: 16 / 9;
     border-radius: 7px;
 }
-.movie-card::after { height: 44px; }
-.movie-card-name { bottom: 19px; font-size: 11px; }
-.movie-card-meta { bottom: 6px; font-size: 10px; }
-.movie-skeleton-name { bottom: 19px; width: 70%; }
-.movie-skeleton-meta { bottom: 6px; width: 45%; }
+/* Không còn chữ phủ lên ảnh → không cần gradient làm nền chữ. */
+.movie-card::after { display: none; }
+/* Tên phim + năm: XUỐNG DƯỚI ẢNH (static flow, giống layout gốc style.css
+   — phone.css đã đổi thành absolute phủ lên poster; override lại ở đây). */
+.movie-card-name {
+    position: static;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    height: auto;
+    max-height: 2.4em;
+    margin: 7px 5px 0;
+    line-height: 1.2;
+    font-size: 14px;
+    text-shadow: none;
+    overflow: hidden;
+}
+.movie-card-meta {
+    position: static;
+    height: auto;
+    margin: 3px 5px 3px;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-shadow: none;
+}
+/* Khung xương lúc đang tải — cùng bố cục (dưới ảnh) để không giật layout. */
+.movie-skeleton-name {
+    position: static;
+    display: block;
+    height: 14px;
+    margin: 7px 5px 0;
+    width: 70%;
+}
+.movie-skeleton-meta {
+    position: static;
+    display: block;
+    height: 11px;
+    margin: 4px 5px 3px;
+    width: 45%;
+}
 .movie-card:active {
     border-color: #fff;
     background: rgba(255, 255, 255, .18);
@@ -161,7 +208,9 @@
 .movie-subtitle-text {
     left: 4%;
     right: 4%;
-    bottom: 64px;
+    /* [build 224] Điều khiển CHUẨN iOS (controls của thẻ <video>) chiếm
+       ~60px dưới đáy → đẩy phụ đề lên cao hơn để KHÔNG bị che. */
+    bottom: 104px;
     font-size: 22px;
     line-height: 1.25;
 }

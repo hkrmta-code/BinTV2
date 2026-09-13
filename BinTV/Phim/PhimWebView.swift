@@ -91,6 +91,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.playerObserverJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
+        // [build 224] Player CHUẨN iOS (thay phim_player_ui.js đã xoá).
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.nativePlayerJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        )
         webView = WKWebView(frame: .zero, configuration: configuration)
         #if DEBUG
         // Safari Web Inspector attach được vào webview (dev build).
@@ -106,6 +110,9 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         configuration.userContentController.add(self, name: "phimBridge")
         configuration.userContentController.add(self, name: "phimConsole")
         webView.navigationDelegate = self
+        // [build 224] Theo dõi app rời/vào lại foreground — phục hồi tab
+        // PHIM khi WebContent process hoặc socket server bị hệ thống dừng.
+        installLifecycleObservers()
         // Long-press (≥0.35s) = HIỆN MENU TAB — nhất quán 4 tab.
         // cancelsTouchesInView = false → tap / swipe / gesture video
         // HOÀN TOÀN không bị ảnh hưởng (cùng kỹ thuật long-press của TUBE).
@@ -189,6 +196,9 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
 
     deinit {
         stop()
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     private func pageURL() -> URL? {
@@ -404,6 +414,101 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     """
 
     // =====================================================================
+    // [BinTV 2026-09-13 build 224] PLAYER CHUẨN iOS CHO TAB PHIM
+    //
+    // ĐÃ XOÁ phim_player_ui.js — lớp HUD tự dựng: tự ẩn overlay sau 3.5s,
+    // nút tạm dừng riêng, kéo timeline riêng, ép xoay ngang khi mở player.
+    // Thay bằng ĐIỀU KHIỂN GỐC CỦA iOS trên thẻ <video> (controls = true):
+    // phát/tạm dừng, tua, AirPlay, NÚT FULLSCREEN → đúng player native
+    // (AVPlayerViewController) như LIVE TV và TUBE, pinch 2 ngón hoạt động.
+    //
+    // app.js GIỮ NGUYÊN hoàn toàn: phụ đề, đổi nguồn/dự phòng, tự chuyển
+    // tập, nhớ vị trí xem, chọn chất lượng — không đụng vào logic đó.
+    // =====================================================================
+
+    private static let nativePlayerJS = """
+    (function () {
+        "use strict";
+        if (window.__binTVNativePlayer) { return; }
+        window.__binTVNativePlayer = true;
+
+        var VIDEO_ID = "bintv-movie-html5-player";
+
+        // Đặt TRUE nếu muốn TỰ ĐỘNG bật fullscreen ngay khi video bắt đầu
+        // phát. MẶC ĐỊNH FALSE có chủ đích: player fullscreen native là lớp
+        // phủ của HỆ THỐNG -> mọi nội dung DOM của app.js (PHỤ ĐỀ, danh
+        // sách tập, chọn chất lượng) bị ẨN trong lúc fullscreen. Người dùng
+        // vẫn vào fullscreen bằng 1 chạm vào nút CHUẨN của iOS khi muốn.
+        var AUTO_FULLSCREEN = false;
+
+        function video() { return document.getElementById(VIDEO_ID); }
+
+        function srcOf(v) {
+            var s = "";
+            try { s = String(v.currentSrc || v.src || ""); } catch (e) {}
+            return s;
+        }
+
+        // MSE (hls.js) cấp nguồn bằng blob: -> player fullscreen native KHÔNG
+        // phát được (chỉ <video> inline render được MSE). iOS 16.5 không có
+        // MSE nên thực tế luôn là HLS native (m3u8 qua proxy) -> fullscreen
+        // dùng được; vẫn chặn blob: để an toàn trên iOS 17.1+ (ManagedMSE).
+        function canGoNativeFullscreen(v) {
+            if (!v) { return false; }
+            try { if (srcOf(v).indexOf("blob:") === 0) { return false; } } catch (e) { return false; }
+            return (typeof v.webkitEnterFullscreen === "function");
+        }
+
+        window.__bintvEnterNativeFullscreen = function () {
+            var v = video();
+            if (!canGoNativeFullscreen(v)) { return false; }
+            try { v.webkitEnterFullscreen(); return true; } catch (e) { return false; }
+        };
+
+        function prepare(v) {
+            if (!v || v.__binTVNativeReady) { return; }
+            v.__binTVNativeReady = true;
+            try {
+                // app.js tạo lại <video> bằng innerHTML -> THUỘC TÍNH BIẾN
+                // MẤT. Thiếu playsinline: iOS có thể từ chối play() (hết
+                // user-activation) hoặc tự cướp sang fullscreen — GIỮ FIX CŨ.
+                v.setAttribute("playsinline", "");
+                v.setAttribute("webkit-playsinline", "");
+            } catch (e) {}
+            try {
+                // Điều khiển CHUẨN iOS (app.js có chỗ set controls = false).
+                v.controls = true;
+            } catch (e) {}
+            if (AUTO_FULLSCREEN) {
+                v.addEventListener("playing", function () {
+                    if (v.__binTVAutoFsDone || !canGoNativeFullscreen(v)) { return; }
+                    v.__binTVAutoFsDone = true;
+                    try { v.webkitEnterFullscreen(); } catch (e) {}
+                }, true);
+                v.addEventListener("emptied", function () { v.__binTVAutoFsDone = false; }, true);
+            }
+        }
+
+        // app.js (re)create phần tử player -> bắt bằng listener CAPTURE trên
+        // document (media event KHÔNG bubble, nhưng capture đi từ document).
+        ["loadedmetadata", "play", "playing"].forEach(function (name) {
+            document.addEventListener(name, function (event) {
+                var v = (event.target && event.target.id === VIDEO_ID) ? event.target : video();
+                prepare(v);
+            }, true);
+        });
+        // Dự phòng: quét lại định kỳ (cùng cơ chế playerObserverJS).
+        var ticks = 0;
+        var timer = setInterval(function () {
+            ticks++;
+            prepare(video());
+            if (ticks >= 60) { clearInterval(timer); }
+        }, 2000);
+        prepare(video());
+    })();
+    """
+
+    // =====================================================================
     // JS bridge (thay AndroidBridge.java)
     // =====================================================================
 
@@ -538,6 +643,124 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     }
 
     // =====================================================================
+    // [FIX 2026-09-13 — ROOT CAUSE "từ màn hình chính quay lại: tab PHIM
+    //  ĐEN HOÀN TOÀN"]
+    //
+    // Ba cơ chế hệ thống xảy ra khi app ở nền, CÙNG cho kết quả "màn đen":
+    //  (1) WebContent process của WKWebView bị kết thúc (jetsam / áp lực bộ
+    //      nhớ). Delegate `webViewWebContentProcessDidTerminate` có reload,
+    //      NHƯNG reload ngay LÚC ĐÓ thường KHÔNG hoàn tất vì app chưa active
+    //      → quay lại chỉ còn layer đen, không tự phục hồi (đúng triệu chứng).
+    //  (2) Socket của server nội bộ (127.0.0.1) bị ĐÓNG khi app ở nền → mọi
+    //      reload/load sau đó thất bại (trang trắng/đen) dù webview còn sống.
+    //  (3) Webview còn sống nhưng KHÔNG được vẽ lại sau khi app trở lại
+    //      (render bị treo) → vẫn đen cho đến khi có một repaint.
+    //
+    // Sửa ĐÚNG NGUYÊN NHÂN theo từng cơ chế: hoãn reload tới khi app thật
+    // sự active, đảm bảo server còn sống TRƯỚC khi reload, và ép vẽ lại +
+    // kiểm tra DOM thật sự còn nội dung (không reload bừa nếu cache/trạng
+    // thái vẫn dùng được).
+    // =====================================================================
+
+    private var lifecycleObservers: [NSObjectProtocol] = []
+
+    /// Process bị kết thúc TRONG LÚC app ở nền → hoãn phục hồi tới foreground.
+    private var pendingRestoreAfterBackground = false
+
+    private func installLifecycleObservers() {
+        let center = NotificationCenter.default
+        let handler: (Notification) -> Void = { [weak self] _ in
+            self?.handleAppDidReturnFromBackground()
+        }
+        lifecycleObservers.append(center.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main, using: handler))
+        lifecycleObservers.append(center.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil, queue: .main, using: handler))
+    }
+
+    /// App vừa trở lại foreground/active: kiểm tra và phục hồi tab PHIM.
+    private func handleAppDidReturnFromBackground() {
+        guard started else { return }   // tab PHIM chưa từng mở → không làm gì
+        // (2) Server nội bộ phải sống TRƯỚC khi reload, nếu không reload sẽ
+        // rơi vào server chết → đen (đúng nguyên nhân số 2).
+        ensureServerAlive()
+        // (1) Process đã chết lúc ở nền → phục hồi ngay bây giờ (đã active).
+        if pendingRestoreAfterBackground {
+            pendingRestoreAfterBackground = false
+            reloadPage(reason: "WebContent process bị kết thúc khi app ở nền")
+            return
+        }
+        // (3) Vẫn còn nội dung → ép vẽ lại + xác minh DOM thật sự sống.
+        repaintWebView()
+        probeAndRestoreIfBlank()
+    }
+
+    /// Socket nghe có thể bị hệ thống đóng lúc app ở nền → khởi lại nếu cần.
+    private func ensureServerAlive() {
+        let server = PhimLocalServer.shared
+        self.server = server
+        guard server.port <= 0 else { return }
+        PhimDebugLog.step("SERVER", "restartOnForeground", "begin", "port=0 (socket bị đóng khi ở nền)")
+        server.onPortReady = { [weak self] port in
+            PhimDebugLog.step("SERVER", "restartOnForeground", "ok", "port=\(port)")
+            self?.loadPage()
+        }
+        server.onPortFailed = { [weak self] message in
+            PhimDebugLog.step("SERVER", "restartOnForeground", "FAIL", message)
+            self?.failMessage = message
+            self?.loadFailed = true
+        }
+        server.start()
+        armServerTimeout()
+    }
+
+    /// Ép WKWebView vẽ lại (rẻ, không reload, không mất trạng thái).
+    private func repaintWebView() {
+        webView.setNeedsLayout()
+        webView.setNeedsDisplay()
+    }
+
+    /// Hỏi thăm DOM: nếu webview trống/không phản hồi → nạp lại; nếu còn nội
+    /// dung → chỉ ép layout/paint (KHÔNG reload khi cache vẫn dùng được).
+    private func probeAndRestoreIfBlank() {
+        // Hỏi DOM: readyState | số node con của body | href hiện tại.
+        // Trả "ERR" nếu JS lỗi; mọi trường hợp khác cho biết webview còn sống.
+        let probe = "(function(){try{return String(document.readyState||'')+'|'+String((document.body&&document.body.childElementCount)||0)+'|'+String(window.location.href||'')}catch(e){return 'ERR'}})()"
+        webView.evaluateJavaScript(probe) { [weak self] result, error in
+            guard let self = self else { return }
+            let text = (result as? String) ?? ""
+            let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            let readyState = parts.count > 0 ? parts[0] : ""
+            let children = Int(parts.count > 1 ? parts[1] : "0") ?? 0
+            let href = parts.count > 2 ? parts[2] : ""
+            let blank = (error != nil) || text == "ERR" || children == 0
+                        || href.isEmpty || readyState == "uninitialized"
+            if blank {
+                self.reloadPage(reason: "webview trống/không phản hồi sau khi ở nền (readyState=\(readyState), children=\(children))")
+            } else {
+                self.repaintWebView()
+                // Đọc layout + bắn resize: buộc WebKit vẽ lại khung hình.
+                self.webView.evaluateJavaScript(
+                    "void document.body.offsetHeight; window.dispatchEvent(new Event('resize'));"
+                ) { _, _ in }
+            }
+        }
+    }
+
+    /// Nạp lại TRANG (không reload bừa): webview mất cả URL → load lại từ
+    /// server; còn URL → reload (giữ localStorage, khôi phục nhanh).
+    private func reloadPage(reason: String) {
+        PhimDebugLog.step("WEBVIEW", "foregroundRestore", "RELOAD", reason)
+        if webView.url == nil {
+            loadPage()
+        } else {
+            webView.reload()
+        }
+    }
+
+    // =====================================================================
     // Audio session (âm thanh phim — độc lập với tab TUBE)
     //
     // Tab TUBE tự set AVAudioSession .playback khi tab hiện, nhưng nếu
@@ -607,7 +830,14 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         PhimDebugLog.step("WEBVIEW", "webContentProcessDidTerminate", "RELOAD",
                            "WebContent process bị hệ thống kết thúc — reload phục hồi")
-        webView.reload()
+        // [build 224] App đang Ở NỀN: reload lúc này thường KHÔNG hoàn tất
+        // (và chính là nguyên nhân quay lại chỉ thấy màn đen) → đánh dấu và
+        // phục hồi khi app thật sự trở lại foreground.
+        if UIApplication.shared.applicationState == .active {
+            webView.reload()
+        } else {
+            pendingRestoreAfterBackground = true
+        }
     }
 
     /// [2026-09-12] Gọi khi tab PHIM hiện trở lại: yêu cầu WKWebView vẽ lại

@@ -15,7 +15,10 @@ import UIKit
 struct PlayerView: View {
     let channel: Channel
     @StateObject private var manager = AVPlayerManager()
-    @State private var showControls = true
+    /// [build 224] Toàn màn hình player native — mức cao nhất của pinch
+    /// PHÓNG TO (FIT → FILL → FULL). Dùng chung một AVPlayer nên
+    /// chuyển chế độ KHÔNG tải lại stream, không gián đoạn.
+    @State private var isNativeFullscreen = false
     @State private var deviceOrientation = UIDevice.current.orientation
     // iPhone: portrait → .compact; landscape → .regular (kích hoạt re-render khi xoay).
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -26,12 +29,19 @@ struct PlayerView: View {
         VStack(spacing: 0) {
             ZStack {
                 Color.black
-                // GravityVideoPlayer = AVPlayerViewController (view bên
-                // trong của SwiftUI VideoPlayer) nhưng để set được
-                // videoGravity → nút FIT/FILL. Controls native (tap để
-                // hiện/ẩn, seek, PiP) giữ nguyên như VideoPlayer.
-                GravityVideoPlayer(player: manager.player,
-                                   gravity: manager.videoGravity)
+                // PLAYER CHUẨN iOS DÙNG CHUNG (AVPlayerViewController +
+                // containment đúng): điều khiển native, PiP, AirPlay và
+                // PINCH 2 NGÓN (FIT → FILL → FULL). Thanh điều khiển tự
+                // dựng đã bị LOẠI BỎ (trùng chức năng với điều khiển gốc).
+                BinTVNativePlayer(player: manager.player,
+                                  gravity: manager.videoGravity,
+                                  isFullscreen: false,
+                                  onGravityChanged: { manager.setGravity($0) },
+                                  onRequestFullscreen: {
+                                      isNativeFullscreen = true
+                                      setInterfaceLandscape(true)
+                                  },
+                                  onRequestExitFullscreen: { })
 
                 if case .loading = manager.state {
                     overlay {
@@ -70,21 +80,22 @@ struct PlayerView: View {
             .ignoresSafeArea(isLandscapeUI ? .all : [])
 
             if !isLandscapeUI {
-                if showControls {
-                    controlsBar
-                }
+                // Không còn thanh điều khiển tự dựng: phát/tạm dừng, tua,
+                // AirPlay, fullscreen đều do ĐIỀU KHIỂN CHUẨN iOS đảm nhiệm.
                 Spacer()
             }
         }
-        // Ngang: thanh điều khiển đặt overlay dưới đáy video (ngang không có
-        // chỗ trống bên dưới), nền tối mờ để đọc được trên video sáng.
-        .overlay(alignment: .bottom) {
-            if isLandscapeUI && showControls {
-                controlsBar
-                    .environment(\.colorScheme, .dark)
-                    .padding(.horizontal)
-                    .background(Color.black.opacity(0.5))
-            }
+        // [build 224] MÀN HÌNH TOÀN PHẦN (mức FULL của pinch): cùng một
+        // AVPlayer → KHÔNG tải lại, KHÔNG gián đoạn; pinch THU NHỎ để thoát.
+        .fullScreenCover(isPresented: $isNativeFullscreen) {
+            BinTVNativePlayer(player: manager.player,
+                              gravity: manager.videoGravity,
+                              isFullscreen: true,
+                              onGravityChanged: { manager.setGravity($0) },
+                              onRequestFullscreen: { },
+                              onRequestExitFullscreen: { isNativeFullscreen = false })
+                .ignoresSafeArea()
+                .background(Color.black.ignoresSafeArea())
         }
         .background(Color.black.ignoresSafeArea())
         .onAppear {
@@ -120,53 +131,6 @@ struct PlayerView: View {
             // App BinTV = chế độ TV LANDSCAPE: đóng player KHÔNG xoay về
             // portrait (giữ layout ngang cho các tab).
         }
-    }
-
-    /// Thanh điều khiển — dùng chung 2 hướng: dọc = bên dưới video (giữ
-    /// nguyên vị trí cũ), ngang = overlay dưới đáy video.
-    private var controlsBar: some View {
-        HStack(spacing: 14) {
-            Button(action: { manager.togglePlayPause() }) {
-                Image(systemName: manager.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.title2)
-            }
-            .disabled(manager.state == .loading)
-
-            // FIT/FILL (đồng bộ UX player):
-            // FIT  = letterbox (giữ nguyên khung hình, có thể có thanh đen).
-            // FILL = lấp đầy màn hình (cắt cạnh thừa). Không bao giờ stretch.
-            Button(action: { manager.toggleFitFill() }) {
-                VStack(spacing: 2) {
-                    Image(systemName: manager.videoGravity == .resizeAspect
-                          ? "arrow.up.backward.and.arrow.down.forward"
-                          : "arrow.down.right.and.arrow.up.left")
-                        .font(.title3)
-                    Text(manager.videoGravity == .resizeAspect ? "FIT" : "FILL")
-                        .font(.caption2)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(channel.name)
-                    .font(.headline)
-                Text(channel.currentURL)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            Spacer()
-
-            // Ẩn/hiện thanh điều khiển (immersive). VideoPlayer vẫn giữ
-            // controls native: seek, fullscreen, PiP khi chạm vào video.
-            Button(action: { withAnimation { showControls.toggle() } }) {
-                Image(systemName: showControls
-                      ? "arrow.down.right.and.arrow.up.left"
-                      : "arrow.up.left.and.arrow.down.right")
-            }
-        }
-        .padding()
     }
 
     // MARK: - Orientation (cùng cơ chế với tab MOVIE)
@@ -206,47 +170,62 @@ struct PlayerView: View {
     }
 }
 
-/// AVPlayerViewController qua **UIViewControllerRepresentable** — vừa set
-/// được `videoGravity` vừa có containment đúng (SwiftUI tự `addChild`).
+// =====================================================================
+// PLAYER CHUẨN iOS — DÙNG CHUNG CHO TOÀN BỘ APP (build 224)
+// =====================================================================
+/// `AVPlayerViewController` — ĐÚNG LÀ view controller nằm sau SwiftUI
+/// `VideoPlayer`, nhúng bằng `UIViewControllerRepresentable` (containment
+/// đầy đủ) nên có TRỌN VẸN hành vi chuẩn của iOS: điều khiển gốc (tap để
+/// hiện/ẩn, tua, AirPlay, PiP), fullscreen presentation và PINCH 2 NGÓN.
 ///
-/// AVPlayerViewController CHÍNH LÀ view controller đứng sau SwiftUI
-/// VideoPlayer nên behavior native giữ nguyên: tap video = hiện/ẩn
-/// controls, nút seek, PiP, fullscreen của AVKit.
+/// PINCH 2 NGÓN — đổi chế độ xem (yêu cầu đồng bộ hoá player):
+///   • PHÓNG TO (zoom in) : FIT (vừa khung, còn viền đen)
+///                          → FILL (lấp đầy, cắt mép thừa)
+///                          → FULL (toàn màn hình player native)
+///   • THU NHỎ (zoom out) : FULL → FILL → FIT
+///   • Mỗi bước = 18% tỉ lệ pinch; `scale` được reset sau mỗi bước nên một
+///     cái pinch liên tục đi lần lượt FIT → FILL → FULL (không vọt mức).
+///   • Gesture chạy ĐỒNG THỜI với gesture của AVKit
+///     (`shouldRecognizeSimultaneouslyWith = true`) → không cướp thao tác.
 ///
-/// -------------------------------------------------------------------
-/// [FIX 2026-09-12, build 223 — NÚT FULLSCREEN: ĐEN MÀN HÌNH + DỪNG PHÁT]
-/// -------------------------------------------------------------------
-/// Bản cũ dùng `UIViewRepresentable` và trả `coordinator.view` — tức là lấy
-/// VIEW của AVPlayerViewController nhét vào hierarchy SwiftUI mà KHÔNG BAO
-/// GIỜ `addChild(_:)`: VC đứng ngoài hệ thống (không parent, không nằm
-/// trong responder chain). Nút fullscreen (mũi tên 2 chiều) kích hoạt
-/// **full screen presentation** — một thao tác CẤP VIEW CONTROLLER, cần VC
-/// cha để present. Thiếu cha → AVKit dựng vùng chứa fullscreen không bao
-/// giờ hiển thị ⇒ **màn hình đen**, đồng thời AVKit **PAUSE player** trong
-/// lúc chuyển ⇒ **video bị gián đoạn** (đúng 2 triệu chứng người dùng báo).
-///
-/// CÁCH SỬA (2 phần, đều bằng API công khai):
-///   1. Đổi sang `UIViewControllerRepresentable` → SwiftUI tự addChild →
-///      containment đúng → fullscreen presentation có VC cha để present.
-///   2. Coordinator làm `AVPlayerViewControllerDelegate`: ghi nhận player
-///      đang phát trước khi chuyển và gọi lại `play()` SAU khi transition
-///      kết thúc (bù đúng hành vi pause của AVKit) — cả khi VÀO lẫn khi
-///      THOÁT fullscreen. Riêng PiP: KHÔNG tự đóng player inline (đóng =
-///      mất video → đen).
-private struct GravityVideoPlayer: UIViewControllerRepresentable {
+/// [FIX build 223 — giữ nguyên] Hai phần bắt buộc để fullscreen KHÔNG đen
+/// và KHÔNG dừng phát:
+///   1. `UIViewControllerRepresentable` (thay `UIViewRepresentable` trả
+///      `coordinator.view`): thiếu containment → fullscreen presentation
+///      không có VC cha để present → màn hình đen.
+///   2. `AVPlayerViewControllerDelegate`: AVKit **PAUSE** player trong lúc
+///      chuyển chế độ trình bày → gọi lại `play()` SAU khi transition kết
+///      thúc (bỏ qua khi người dùng huỷ giữa chừng: `isCancelled`).
+private struct BinTVNativePlayer: UIViewControllerRepresentable {
     let player: AVPlayer
     let gravity: AVLayerVideoGravity
+    /// Đang là màn hình FULL (toàn màn hình) → pinch THU NHỎ sẽ thoát FULL.
+    let isFullscreen: Bool
+    let onGravityChanged: (AVLayerVideoGravity) -> Void
+    let onRequestFullscreen: () -> Void
+    let onRequestExitFullscreen: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(gravity: gravity,
+                    isFullscreen: isFullscreen,
+                    onGravityChanged: onGravityChanged,
+                    onRequestFullscreen: onRequestFullscreen,
+                    onRequestExitFullscreen: onRequestExitFullscreen)
     }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
         controller.videoGravity = gravity
-        // Theo dõi fullscreen để GIỮ PHÁT (bù pause của AVKit).
+        // Theo dõi chuyển chế độ trình bày để GIỮ PHÁT (bù pause của AVKit).
         controller.delegate = context.coordinator
+        // PINCH 2 NGÓN → FIT / FILL / FULL.
+        let pinch = UIPinchGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePinch(_:)))
+        pinch.cancelsTouchesInView = false
+        pinch.delegate = context.coordinator
+        controller.view.addGestureRecognizer(pinch)
         return controller
     }
 
@@ -263,6 +242,13 @@ private struct GravityVideoPlayer: UIViewControllerRepresentable {
             controller.videoGravity = gravity
         }
         controller.delegate = context.coordinator
+        // Coordinator là class sống lâu hơn struct → cập nhật giá trị mới
+        // nhất (gravity/trạng thái fullscreen/closure) mỗi lần render.
+        context.coordinator.update(gravity: gravity,
+                                   isFullscreen: isFullscreen,
+                                   onGravityChanged: onGravityChanged,
+                                   onRequestFullscreen: onRequestFullscreen,
+                                   onRequestExitFullscreen: onRequestExitFullscreen)
     }
 
     /// Giữ player sống sót qua các lần render/fullscreen: KHÔNG tháo
@@ -272,12 +258,91 @@ private struct GravityVideoPlayer: UIViewControllerRepresentable {
         // Cố tình không gán controller.player = nil.
     }
 
-    /// Đại diện xử lý fullscreen — lý do tồn tại duy nhất: KHÔNG ĐỂ MẤT
-    /// PHÁT khi AVKit chuyển đổi chế độ trình bày.
-    final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
+    /// Xử lý PINCH (FIT/FILL/FULL) + giữ phát khi AVKit đổi chế độ trình bày.
+    final class Coordinator: NSObject, AVPlayerViewControllerDelegate,
+                             UIGestureRecognizerDelegate {
+        private var gravity: AVLayerVideoGravity
+        private var isFullscreen: Bool
+        private var onGravityChanged: (AVLayerVideoGravity) -> Void
+        private var onRequestFullscreen: () -> Void
+        private var onRequestExitFullscreen: () -> Void
+
         /// Đang phát trước khi bắt đầu chuyển? (AVKit sẽ pause trong lúc
         /// chuyển → dùng để khôi phục đúng trạng thái sau transition).
         private var wasPlayingBeforeTransition = false
+
+        /// Ngưỡng pinch cho MỘT bước (18%).
+        private static let stepThreshold: CGFloat = 0.18
+
+        init(gravity: AVLayerVideoGravity,
+             isFullscreen: Bool,
+             onGravityChanged: @escaping (AVLayerVideoGravity) -> Void,
+             onRequestFullscreen: @escaping () -> Void,
+             onRequestExitFullscreen: @escaping () -> Void) {
+            self.gravity = gravity
+            self.isFullscreen = isFullscreen
+            self.onGravityChanged = onGravityChanged
+            self.onRequestFullscreen = onRequestFullscreen
+            self.onRequestExitFullscreen = onRequestExitFullscreen
+            super.init()
+        }
+
+        func update(gravity: AVLayerVideoGravity,
+                    isFullscreen: Bool,
+                    onGravityChanged: @escaping (AVLayerVideoGravity) -> Void,
+                    onRequestFullscreen: @escaping () -> Void,
+                    onRequestExitFullscreen: @escaping () -> Void) {
+            self.gravity = gravity
+            self.isFullscreen = isFullscreen
+            self.onGravityChanged = onGravityChanged
+            self.onRequestFullscreen = onRequestFullscreen
+            self.onRequestExitFullscreen = onRequestExitFullscreen
+        }
+
+        // MARK: - Pinch 2 ngón: FIT → FILL → FULL (và ngược lại)
+
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            guard gesture.state == .changed || gesture.state == .ended else { return }
+            let scale = gesture.scale
+            if scale > 1 + Coordinator.stepThreshold {
+                // Reset ngay: mỗi bước pinch là MỘT lần đổi mức, pinch tiếp
+                // tục thì đi mức kế tiếp (không vọt thẳng lên FULL).
+                gesture.scale = 1
+                zoomIn()
+            } else if scale < 1 - Coordinator.stepThreshold {
+                gesture.scale = 1
+                zoomOut()
+            }
+        }
+
+        /// PHÓNG TO: FIT → FILL → FULL.
+        private func zoomIn() {
+            if gravity == .resizeAspect {
+                onGravityChanged(.resizeAspectFill)      // FIT → FILL
+            } else if !isFullscreen {
+                onRequestFullscreen()                    // FILL → FULL
+            }
+            // Đang FULL + FILL: mức cao nhất — không làm gì thêm.
+        }
+
+        /// THU NHỎ: FULL → FILL → FIT.
+        private func zoomOut() {
+            if isFullscreen {
+                onRequestExitFullscreen()                // FULL → FILL (inline)
+            } else if gravity == .resizeAspectFill {
+                onGravityChanged(.resizeAspect)          // FILL → FIT
+            }
+        }
+
+        /// KHÔNG cướp gesture của AVKit / của SwiftUI (pinch vẫn thuộc về
+        /// player khi cần, và ngược lại).
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith
+                               other: UIGestureRecognizer) -> Bool {
+            return true
+        }
+
+        // MARK: - Giữ phát khi AVKit đổi chế độ trình bày (fix build 223)
 
         /// VÀO fullscreen.
         func playerViewController(
@@ -288,14 +353,14 @@ private struct GravityVideoPlayer: UIViewControllerRepresentable {
             coordinator.animate(alongsideTransition: nil) { [weak self] context in
                 guard let self = self, !context.isCancelled else { return }
                 // Transition xong: AVKit đã pause → PHÁT LẠI nếu trước đó
-                // đang phát (đây chính là phần "video bị gián đoạn").
+                // đang phát.
                 if self.wasPlayingBeforeTransition {
                     playerViewController.player?.play()
                 }
             }
         }
 
-        /// THOÁT fullscreen (về lại inline trong sheet).
+        /// THOÁT fullscreen (về lại inline).
         func playerViewController(
             _ playerViewController: AVPlayerViewController,
             willEndFullScreenPresentationWithAnimationCoordinator
@@ -309,8 +374,8 @@ private struct GravityVideoPlayer: UIViewControllerRepresentable {
             }
         }
 
-        /// Bắt đầu PiP: KHÔNG tự đóng player inline — đóng sẽ làm mất video
-        /// (màn hình đen) trong khi âm thanh vẫn chạy.
+        /// Bắt đầu PiP: KHÔNG tự đóng player inline (đóng = mất hình/đen
+        /// trong khi âm thanh vẫn chạy).
         func playerViewControllerShouldAutomaticallyDismissAtPictureInPictureStart(
             _ playerViewController: AVPlayerViewController) -> Bool {
             return false

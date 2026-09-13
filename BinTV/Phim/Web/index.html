@@ -40,7 +40,7 @@
                 if (/[?&]ios=landscape(?:&|$)/.test(search)) {
                     var landCss = document.createElement("link");
                     landCss.rel = "stylesheet";
-                    landCss.href = "assets/landscape.css?v=20260912a";
+                    landCss.href = "assets/landscape.css?v=20260913a";
                     document.head.appendChild(landCss);
                 }
             }
@@ -297,11 +297,6 @@
          Chi can thiem de debug + thuc hien 1 lan retry direct khi proxy
          fail - khong thay doi flow goc cua app.js. -->
     <script src="assets/phim_ios_fallback.js?v=20260912a"></script>
-    <!-- [Phim ANDROID v1.2.1] HUD player (chay sau app.js): tu an ten phim/
-         trang thai khi dang phat; dien thoai: cham = hien HUD, nut tam dung,
-         keo timeline de tua, tu dong xoay ngang khi phat video. Khong sua bat
-         ky logic nao cua app.js - chi quan ly lop hien thi va them dieu khien. -->
-    <script src="assets/phim_player_ui.js?v=20260911b"></script>
 
     <script>
     // [Phim DEBUG 2026-09] Sau khi app.js load, ghi log xác nhận
