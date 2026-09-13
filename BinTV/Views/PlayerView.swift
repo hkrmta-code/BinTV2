@@ -206,38 +206,114 @@ struct PlayerView: View {
     }
 }
 
-/// AVPlayerViewController qua UIViewRepresentable — để set được
-/// `videoGravity` (SwiftUI `VideoPlayer` không expose thuộc tính này).
+/// AVPlayerViewController qua **UIViewControllerRepresentable** — vừa set
+/// được `videoGravity` vừa có containment đúng (SwiftUI tự `addChild`).
 ///
 /// AVPlayerViewController CHÍNH LÀ view controller đứng sau SwiftUI
 /// VideoPlayer nên behavior native giữ nguyên: tap video = hiện/ẩn
-/// controls, nút seek, PiP, fullscreen của WebKit/AVKit.
+/// controls, nút seek, PiP, fullscreen của AVKit.
 ///
-/// AVPlayerViewController là UIViewController (UIViewRepresentable cần
-/// UIView) → giữ reference trong Coordinator, trả `coordinator.view`.
-private struct GravityVideoPlayer: UIViewRepresentable {
+/// -------------------------------------------------------------------
+/// [FIX 2026-09-12, build 223 — NÚT FULLSCREEN: ĐEN MÀN HÌNH + DỪNG PHÁT]
+/// -------------------------------------------------------------------
+/// Bản cũ dùng `UIViewRepresentable` và trả `coordinator.view` — tức là lấy
+/// VIEW của AVPlayerViewController nhét vào hierarchy SwiftUI mà KHÔNG BAO
+/// GIỜ `addChild(_:)`: VC đứng ngoài hệ thống (không parent, không nằm
+/// trong responder chain). Nút fullscreen (mũi tên 2 chiều) kích hoạt
+/// **full screen presentation** — một thao tác CẤP VIEW CONTROLLER, cần VC
+/// cha để present. Thiếu cha → AVKit dựng vùng chứa fullscreen không bao
+/// giờ hiển thị ⇒ **màn hình đen**, đồng thời AVKit **PAUSE player** trong
+/// lúc chuyển ⇒ **video bị gián đoạn** (đúng 2 triệu chứng người dùng báo).
+///
+/// CÁCH SỬA (2 phần, đều bằng API công khai):
+///   1. Đổi sang `UIViewControllerRepresentable` → SwiftUI tự addChild →
+///      containment đúng → fullscreen presentation có VC cha để present.
+///   2. Coordinator làm `AVPlayerViewControllerDelegate`: ghi nhận player
+///      đang phát trước khi chuyển và gọi lại `play()` SAU khi transition
+///      kết thúc (bù đúng hành vi pause của AVKit) — cả khi VÀO lẫn khi
+///      THOÁT fullscreen. Riêng PiP: KHÔNG tự đóng player inline (đóng =
+///      mất video → đen).
+private struct GravityVideoPlayer: UIViewControllerRepresentable {
     let player: AVPlayer
     let gravity: AVLayerVideoGravity
 
-    func makeCoordinator() -> AVPlayerViewController {
-        let vc = AVPlayerViewController()
-        vc.player = player
-        vc.videoGravity = gravity
-        return vc
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
 
-    func makeUIView(context: Context) -> UIView {
-        let coordinator = context.coordinator
-        coordinator.player = player
-        coordinator.videoGravity = gravity
-        return coordinator.view
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.videoGravity = gravity
+        // Theo dõi fullscreen để GIỮ PHÁT (bù pause của AVKit).
+        controller.delegate = context.coordinator
+        return controller
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        let coordinator = context.coordinator
-        if coordinator.player !== player {
-            coordinator.player = player
+    func updateUIViewController(_ controller: AVPlayerViewController,
+                                context: Context) {
+        // Chỉ gán lại khi THẬT SỰ khác — gán lại vô điều kiện có thể làm
+        // gián đoạn phát mỗi lần SwiftUI render lại.
+        if controller.player !== player {
+            controller.player = player
         }
-        coordinator.videoGravity = gravity
+        // So bằng rawValue (String) — chắc chắn hợp lệ với mọi SDK, không
+        // phụ thuộc Equatable của AVLayerVideoGravity.
+        if controller.videoGravity.rawValue != gravity.rawValue {
+            controller.videoGravity = gravity
+        }
+        controller.delegate = context.coordinator
+    }
+
+    /// Giữ player sống sót qua các lần render/fullscreen: KHÔNG tháo
+    /// `player` ở đây (tháo = dừng phát ngay lập tức).
+    static func dismantleUIViewController(_ controller: AVPlayerViewController,
+                                          coordinator: Coordinator) {
+        // Cố tình không gán controller.player = nil.
+    }
+
+    /// Đại diện xử lý fullscreen — lý do tồn tại duy nhất: KHÔNG ĐỂ MẤT
+    /// PHÁT khi AVKit chuyển đổi chế độ trình bày.
+    final class Coordinator: NSObject, AVPlayerViewControllerDelegate {
+        /// Đang phát trước khi bắt đầu chuyển? (AVKit sẽ pause trong lúc
+        /// chuyển → dùng để khôi phục đúng trạng thái sau transition).
+        private var wasPlayingBeforeTransition = false
+
+        /// VÀO fullscreen.
+        func playerViewController(
+            _ playerViewController: AVPlayerViewController,
+            willBeginFullScreenPresentationWithAnimationCoordinator
+                coordinator: UIViewControllerTransitionCoordinator) {
+            wasPlayingBeforeTransition = (playerViewController.player?.rate ?? 0) > 0
+            coordinator.animate(alongsideTransition: nil) { [weak self] context in
+                guard let self = self, !context.isCancelled else { return }
+                // Transition xong: AVKit đã pause → PHÁT LẠI nếu trước đó
+                // đang phát (đây chính là phần "video bị gián đoạn").
+                if self.wasPlayingBeforeTransition {
+                    playerViewController.player?.play()
+                }
+            }
+        }
+
+        /// THOÁT fullscreen (về lại inline trong sheet).
+        func playerViewController(
+            _ playerViewController: AVPlayerViewController,
+            willEndFullScreenPresentationWithAnimationCoordinator
+                coordinator: UIViewControllerTransitionCoordinator) {
+            let wasPlaying = (playerViewController.player?.rate ?? 0) > 0
+            coordinator.animate(alongsideTransition: nil) { context in
+                guard !context.isCancelled else { return }
+                if wasPlaying {
+                    playerViewController.player?.play()
+                }
+            }
+        }
+
+        /// Bắt đầu PiP: KHÔNG tự đóng player inline — đóng sẽ làm mất video
+        /// (màn hình đen) trong khi âm thanh vẫn chạy.
+        func playerViewControllerShouldAutomaticallyDismissAtPictureInPictureStart(
+            _ playerViewController: AVPlayerViewController) -> Bool {
+            return false
+        }
     }
 }
