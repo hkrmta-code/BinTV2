@@ -324,6 +324,111 @@ ok(should_receive_edge_pan("livetv_grid", "left") and should_receive_edge_pan("l
    "vuốt cạnh trái/phải trên trang thường → nhận đúng yêu cầu")
 
 # =====================================================================
+print("\n=== T5.5 — Nhận diện VUỐT MÉP (build 222, thay UIScreenEdgePan) ===")
+
+WIDTH = 932.0          # iPhone 14 Pro Max landscape (màn ngang dài)
+
+
+def edge_zone_for(width):
+    """Mirror `edgeZone(for:)` — dải mép tự co theo màn hình."""
+    return min(max(width * 0.09, 30), 70)
+
+
+class Swipe:
+    """Mirror `BinTVEdgeSwipeRecognizer` (UIPanGestureRecognizer)."""
+
+    def __init__(self, edge, width=WIDTH):
+        self.edge = edge
+        self.edge_zone = edge_zone_for(width)
+        self.min_translation = 45
+        self.start_x = 0.0
+        self.has_fired = False
+
+
+def feed(sw, state, start_x, tx, ty, width=WIDTH, log=None):
+    """Mirror `handleEdgeSwipe(_:)` — trả về hành động đã kích hoạt."""
+    if state == "began":
+        sw.start_x = start_x
+        sw.edge_zone = edge_zone_for(width)
+        sw.has_fired = False
+        return None
+    if state in ("ended", "cancelled", "failed"):
+        sw.has_fired = False
+        return None
+    if state != "changed" or sw.has_fired:
+        return None
+    if not (abs(tx) >= sw.min_translation and abs(tx) > abs(ty) * 1.5):
+        return None
+    if sw.edge == "left" and sw.start_x <= sw.edge_zone and tx > 0:
+        sw.has_fired = True
+        if log is not None:
+            log.append("back")
+        return "back"
+    if sw.edge == "right" and sw.start_x >= width - sw.edge_zone and tx < 0:
+        sw.has_fired = True
+        if log is not None:
+            log.append("menu")
+        return "menu"
+    return None
+
+
+eq(round(edge_zone_for(932), 1), 70.0, "dải mép màn lớn bị kẹp ở 70pt (không lấn nội dung)")
+eq(round(edge_zone_for(568), 1), 51.1, "dải mép SE landscape ~51pt (tự co theo màn hình)")
+eq(round(edge_zone_for(430), 1), 38.7, "dải mép màn nhỏ ~39pt (vẫn dễ vuốt)")
+
+# (1) Vuốt từ cạnh TRÁI sang phải → Back đúng 1 lần
+log = []
+sw = Swipe("left")
+feed(sw, "began", start_x=8, tx=0, ty=0, log=log)
+eq(feed(sw, "changed", start_x=8, tx=80, ty=5, log=log), "back", "vuốt cạnh trái → Back")
+eq(feed(sw, "changed", start_x=8, tx=200, ty=5, log=log), None, "cùng 1 lần vuốt → KHÔNG Back thêm lần nữa")
+eq(len(log), 1, "mỗi lần vuốt = đúng 1 bước Back")
+
+# (2) Kết thúc vuốt → lần vuốt mới lại hoạt động
+feed(sw, "ended", start_x=8, tx=200, ty=5, log=log)
+feed(sw, "began", start_x=12, tx=0, ty=0, log=log)
+eq(feed(sw, "changed", start_x=12, tx=60, ty=0, log=log), "back", "vuốt mới sau .ended → Back tiếp")
+eq(len(log), 2, "2 lần vuốt = 2 bước Back")
+
+# (3) Vuốt DỌC ở mép trái → KHÔNG kích hoạt (vẫn là cuộn nội dung)
+log2 = []
+sw2 = Swipe("left")
+feed(sw2, "began", start_x=8, tx=0, ty=0, log=log2)
+eq(feed(sw2, "changed", start_x=8, tx=15, ty=160, log=log2), None, "vuốt dọc ở mép → không Back (cuộn bình thường)")
+
+# (4) Vuốt ngang GIỮA màn hình → KHÔNG kích hoạt
+sw3 = Swipe("left")
+feed(sw3, "began", start_x=400, tx=0, ty=0, log=log2)
+eq(feed(sw3, "changed", start_x=400, tx=300, ty=0, log=log2), None, "vuốt ngang giữa màn hình → không Back")
+
+# (5) Vuốt ở mép trái nhưng hướng NGƯỢC lại → KHÔNG kích hoạt
+sw4 = Swipe("left")
+feed(sw4, "began", start_x=8, tx=0, ty=0, log=log2)
+eq(feed(sw4, "changed", start_x=8, tx=-90, ty=0, log=log2), None, "vuốt từ mép trái sang TRÁI → không Back")
+
+# (6) Chưa đủ quãng vuốt → KHÔNG kích hoạt
+sw5 = Swipe("left")
+feed(sw5, "began", start_x=8, tx=0, ty=0, log=log2)
+eq(feed(sw5, "changed", start_x=8, tx=20, ty=0, log=log2), None, "quãng vuốt < 45pt → chưa kích hoạt")
+
+# (7) Vuốt từ cạnh PHẢI vào trong → hiện menu
+log3 = []
+sw6 = Swipe("right")
+feed(sw6, "began", start_x=WIDTH - 6, tx=0, ty=0, log=log3)
+eq(feed(sw6, "changed", start_x=WIDTH - 6, tx=-90, ty=0, log=log3), "menu", "vuốt cạnh phải vào → hiện menu")
+eq(len(log3), 1, "vuốt phải kích hoạt đúng 1 lần")
+eq(feed(sw6, "changed", start_x=WIDTH - 6, tx=-200, ty=0, log=log3), None, "cùng lần vuốt → không hiện menu 2 lần")
+
+# (8) Vuốt phải từ giữa màn hình / sai hướng → KHÔNG kích hoạt
+sw7 = Swipe("right")
+feed(sw7, "began", start_x=400, tx=0, ty=0, log=log3)
+eq(feed(sw7, "changed", start_x=400, tx=-200, ty=0, log=log3), None, "vuốt phải từ giữa màn hình → không hiện menu")
+sw8 = Swipe("right")
+feed(sw8, "began", start_x=WIDTH - 6, tx=0, ty=0, log=log3)
+eq(feed(sw8, "changed", start_x=WIDTH - 6, tx=90, ty=0, log=log3), None, "vuốt từ mép phải ra ngoài → không hiện menu")
+eq(len(log3), 1, "tổng cộng chỉ 1 lần hiện menu")
+
+# =====================================================================
 print("\n----------------------------------------")
 print(f"PASSED: {PASSED}  FAILED: {FAILED}")
 if FAILS:

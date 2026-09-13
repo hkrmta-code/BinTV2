@@ -490,3 +490,26 @@ Bản 220 xử lý phần ngọn (`webViewWebContentProcessDidTerminate` → rel
 **Guard chống tái diễn (MỚI — T4.5b trong `tests/mock-e2e/test_project_consistency.py`):** quét toàn bộ file Swift, xác định **thành viên trực tiếp** của mỗi `extension` (depth == extension_depth + 1, không bắt nhầm biến cục bộ trong thân hàm) và fail nếu có `var/let` không phải `static`/computed. Guard **tự kiểm chứng** bằng cách tạo file probe có lỗi và xác nhận nó bị bắt. Suite: **432/432 PASS**.
 
 **Trung thực:** các lỗi chỉ lộ ở bước type-check/link bằng UIKit thật (không có trên Linux) vẫn cần GitHub Actions làm cổng xác nhận cuối; mỗi lỗi mới lộ ra đều được bổ sung guard tĩnh như trên.
+
+---
+
+## ADDENDUM 11 — BACK CẠNH TRÁI KHÔNG HOẠT ĐỘNG: `UIScreenEdgePanGestureRecognizer` bị hệ thống gate trên UIWindow (build 222 / 2.4.2)
+
+**Triệu chứng thực tế trên máy (iOS 16.5, TrollStore):** giữ màn hình → menu hiện (OK), nhưng **vuốt từ cạnh trái → không có Back**.
+
+**Phân tích:** long-press và edge-pan được gắn bởi CÙNG một hàm `install()` trên UIWindow → long-press chạy được chứng tỏ recognizer đã được gắn thành công. Vậy lỗi nằm ở **bản thân `UIScreenEdgePanGestureRecognizer`**: iOS gắn sẵn các recognizer "gate" vùng mép ngay trên `UIWindow` (system gesture gate), và chúng được ưu tiên nhận touch sát mép màn hình. Khi app gắn thêm `UIScreenEdgePanGestureRecognizer` lên window, recognizer của app thường **không bao giờ chuyển sang trạng thái began** — đúng triệu chứng: gesture không phải-edge (long-press) vẫn sống, gesture sát-mép thì chết. Đây là giới hạn đã biết của iOS khi dùng edge recognizer ở cấp window; các app thường gắn nó trên **view của view controller**, nhưng lúc đó lại không phủ được sheet (lý do bản 221 chọn window).
+
+**Fix (bỏ phụ thuộc vào recognizer nội bộ):** thay bằng `BinTVEdgeSwipeRecognizer: UIPanGestureRecognizer` + **tự phát hiện vùng mép**:
+- `.began`: ghi toạ độ X bắt đầu; cập nhật dải mép theo bề rộng màn hình hiện tại; reset cờ.
+- `.changed`: kích hoạt khi **vuốt NGANG** (`|x| ≥ 45pt` và `|x| > |y|·1.5`), điểm bắt đầu nằm trong dải mép (`startX ≤ edgeZone` với cạnh trái / `startX ≥ width − edgeZone` với cạnh phải) và đúng hướng (`x > 0` = Back, `x < 0` = hiện menu).
+- `edgeZone = min(max(width × 0.09, 30), 70)` pt — tự co theo máy (932pt → 70pt; 568pt → 51pt; 430pt → 39pt).
+- `hasFired` đảm bảo **mỗi lần vuốt kích hoạt đúng 1 lần**; reset ở `.ended/.cancelled/.failed`.
+- Giữ nguyên ưu điểm của bản 221 (gắn trên window → phủ cả sheet player) nhưng không còn bị gate: pan thường **không** nằm trong nhóm bị hệ thống giữ quyền ưu tiên ở mép.
+- Thêm: `resolveWindow()` ưu tiên giữ window đã gắn lần đầu (tránh gắn nhầm window tạm thời của WebKit/AVKit fullscreen, vì window đó cũng có thể là key window); gắn lại recognizer khi `didBecomeActive`.
+- **Root Back**: không thoát app, không đổi giao diện — chỉ rung nhẹ để xác nhận thao tác đã được nhận (giúp phân biệt "vuốt chưa tới" và "hết chỗ để Back").
+
+**Kiểm chứng:**
+- `swiftc -parse` 20/20 file: sạch. Type-check phần gesture bằng Swift 5.9 thật + stub UIKit: **PASS** (chỉ bỏ API `NotificationCenter.addObserver(selector:)` khi check vì Linux không có ObjC interop — API chuẩn trên iOS).
+- Guard stored-property-trong-extension (T4.5b): CLEAN (lỗi exit 65 của run trước không thể tái diễn).
+- Suite: **462/462 PASS** — T4.10 có 12 assertion mới cho bộ máy vuốt mép; **T5.5 (18 assertion)** mô phỏng chính xác `handleEdgeSwipe`: Back đúng 1 lần/lần vuốt, không fire khi vuốt dọc / giữa màn hình / sai hướng / chưa đủ 45pt, vuốt phải hiện menu đúng 1 lần, dải mép tự co theo 3 cỡ màn hình.
+- **NOT VERIFIED:** test trên máy thật (không có thiết bị) — cổng xác nhận: build 222 trên GitHub Actions, cài qua TrollStore, vuốt từ mép trái (cách mép ≤ ~70pt, vuốt ngang ≥ ~45pt).

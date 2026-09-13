@@ -272,7 +272,10 @@ struct ContentView: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return
         }
-        // Root: không còn mức nào phía trước — cố tình KHÔNG làm gì.
+        // Root: không còn mức nào phía trước — KHÔNG thoát app, KHÔNG đóng
+        // tab, KHÔNG đổi giao diện; chỉ rung nhẹ để xác nhận thao tác đã
+        // được nhận (giúp phân biệt "vuốt chưa tới" và "hết chỗ để Back").
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 }
 
@@ -313,10 +316,32 @@ final class BinTVMenuLongPressRecognizer: UILongPressGestureRecognizer {
     }
 }
 
-/// Edge-pan điều hướng (cạnh phải = menu, cạnh trái = Back). Lớp con
-/// chỉ để nhận diện chính xác recognizer của mình trên window (tránh
-/// đụng vào recognizer của hệ thống / WebKit).
-final class BinTVScreenEdgePanRecognizer: UIScreenEdgePanGestureRecognizer {}
+/// Vuốt từ mép màn hình — `UIPanGestureRecognizer` thường + **TỰ PHÁT HIỆN**
+/// vùng mép (thay cho `UIScreenEdgePanGestureRecognizer`).
+///
+/// [2026-09-12, build 222 — VÌ SAO PHẢI ĐỔI] `UIScreenEdgePanGestureRecognizer`
+/// gắn trên `UIWindow` thường **KHÔNG BAO GIỜ được nhận diện** trên iOS 16:
+/// hệ thống đã gắn sẵn các recognizer "gate" vùng mép ngay trên window và
+/// chúng được ưu tiên, nên mọi vuốt sát mép bị hệ thống giữ lại — khớp chính
+/// xác triệu chứng thực tế trên máy: **long-press (không phải edge) hoạt
+/// động, còn "vuốt cạnh trái = Back" thì không**. Cơ chế dưới đây không phụ
+/// thuộc recognizer nội bộ: chỉ cần điểm chạm BẮT ĐẦU nằm trong dải
+/// `edgeZone` sát mép và vuốt NGANG vượt `minTranslation` → kích hoạt
+/// **đúng 1 lần** cho mỗi lần vuốt (`hasFired`).
+final class BinTVEdgeSwipeRecognizer: UIPanGestureRecognizer {
+    enum Edge: Equatable { case left, right }
+
+    /// Cạnh mà recognizer này phụ trách.
+    var edge: Edge = .left
+    /// Bề rộng dải bắt đầu tính từ mép màn hình (pt) — tự co theo màn hình.
+    var edgeZone: CGFloat = 40
+    /// Quãng vuốt NGANG tối thiểu để kích hoạt (pt).
+    var minTranslation: CGFloat = 45
+    /// Toạ độ X lúc chạm xuống (ghi ở trạng thái .began).
+    var startX: CGFloat = 0
+    /// Đã kích hoạt cho lần vuốt hiện tại chưa (1 lần vuốt = tối đa 1 lần).
+    var hasFired = false
+}
 
 // MARK: - Gắn gesture lên UIWindow (phủ cả tab lẫn sheet)
 
@@ -332,11 +357,11 @@ final class BinTVScreenEdgePanRecognizer: UIScreenEdgePanGestureRecognizer {}
 ///   hệ thống dùng để chọn/paste → không nhận (tránh cướp mất).
 /// • Menu đang mở / player sheet đang mở → không nhận (nút menu và điều
 ///   khiển video phải nhận touch bình thường).
-/// • Edge-pan: nhường webview có `allowsBackForwardNavigationGestures`
+/// • Edge-swipe: nhường webview có `allowsBackForwardNavigationGestures`
 ///   (TUBE) để không bị Back/Next 2 lần cho một cái vuốt.
-/// Mọi recognizer đều `cancelsTouchesInView=false` + `delaysTouchesBegan
-/// = false` (trừ long-press như mô tả ở trên) → vuốt, scroll, điều khiển
-/// video, pinch… hoàn toàn không bị ảnh hưởng.
+/// Các recognizer vuốt dùng `cancelsTouchesInView = false` +
+/// `delaysTouchesBegan = false` → vuốt, scroll, điều khiển video, pinch…
+/// hoàn toàn không bị ảnh hưởng.
 private struct BinTVWindowGestures: UIViewControllerRepresentable {
     /// Giữ màn hình ≥0.35s → gọi.
     var onLongPress: () -> Void
@@ -376,6 +401,8 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
         var onEdgeLeft: () -> Void
         var longPressAllowed: () -> Bool
         private var retries = 0
+        /// Window đang mang recognizer (giữ để không gắn nhầm window tạm thời).
+        private weak var installedWindow: UIWindow?
 
         init(onLongPress: @escaping () -> Void,
              onEdgeRight: @escaping () -> Void,
@@ -386,16 +413,28 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
             self.onEdgeLeft = onEdgeLeft
             self.longPressAllowed = longPressAllowed
             super.init()
+            // Mỗi lần app trở lại foreground: đảm bảo recognizer vẫn còn
+            // (window có thể đã đổi sau khi phát video fullscreen).
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(appDidBecomeActive),
+                name: UIApplication.didBecomeActiveNotification,
+                object: nil)
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
         }
 
         /// Gắn 3 recognizer lên window — IDEMPOTENT (mỗi loại đúng 1 lần).
         func install() {
-            guard let window = Self.keyWindow() else {
+            guard let window = resolveWindow() else {
                 // Window chưa sẵn sàng lúc mới render (scene chưa active)
                 // → thử lại ngắn (tối đa ~6s).
                 scheduleRetry()
                 return
             }
+            installedWindow = window
 
             if !(window.gestureRecognizers?.contains { $0 is BinTVMenuLongPressRecognizer } ?? false) {
                 let press = BinTVMenuLongPressRecognizer(
@@ -404,28 +443,49 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
                 window.addGestureRecognizer(press)
             }
 
-            installEdgePan(.right, on: window, action: #selector(handleEdgeRight(_:)))
-            installEdgePan(.left, on: window, action: #selector(handleEdgeLeft(_:)))
+            installEdgeSwipe(.right, on: window)
+            installEdgeSwipe(.left, on: window)
         }
 
-        private func installEdgePan(_ edges: UIRectEdge,
-                                    on window: UIWindow,
-                                    action: Selector) {
+        private func installEdgeSwipe(_ edge: BinTVEdgeSwipeRecognizer.Edge,
+                                      on window: UIWindow) {
             let already = window.gestureRecognizers?.contains {
-                guard let existing = $0 as? BinTVScreenEdgePanRecognizer else { return false }
-                return existing.edges == edges
+                guard let existing = $0 as? BinTVEdgeSwipeRecognizer else { return false }
+                return existing.edge == edge
             } ?? false
             guard !already else { return }
-            let pan = BinTVScreenEdgePanRecognizer(target: self, action: action)
-            pan.edges = edges
+            let pan = BinTVEdgeSwipeRecognizer(target: self,
+                                               action: #selector(handleEdgeSwipe(_:)))
+            pan.edge = edge
+            pan.edgeZone = Self.edgeZone(for: window)
             pan.maximumNumberOfTouches = 1
-            // Touch vẫn được giao NGAY cho webview/video/scroll — edge-pan
-            // chỉ nhận khi ngón BẮT ĐẦU sát mép màn hình (cùng triết lý
-            // interactive-pop của hệ thống) → không cướp thao tác nội dung.
+            // Touch vẫn được giao NGAY cho webview/video/scroll — recognizer
+            // này chỉ "ra quyết định" khi ngón BẮT ĐẦU sát mép màn hình và
+            // vuốt ngang đủ xa (cùng triết lý interactive-pop của hệ thống)
+            // → không cướp thao tác nội dung.
             pan.cancelsTouchesInView = false
             pan.delaysTouchesBegan = false
             pan.delegate = self
             window.addGestureRecognizer(pan)
+        }
+
+        /// Dải mép (pt): ~9% bề rộng màn hình, kẹp [30, 70] — đủ rộng để dễ
+        /// vuốt ở landscape (cạnh dài), không lấn vào vùng nội dung.
+        private static func edgeZone(for window: UIWindow) -> CGFloat {
+            let width = window.bounds.width
+            return min(max(width * 0.09, 30), 70)
+        }
+
+        /// Window của app — ƯU TIÊN giữ window đã gắn lần đầu để KHÔNG gắn
+        /// nhầm vào window tạm thời do WebKit/AVKit tạo khi phát video
+        /// fullscreen (window đó cũng có thể trở thành key window).
+        private func resolveWindow() -> UIWindow? {
+            if let existing = installedWindow { return existing }
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+                .filter { $0.rootViewController != nil }
+            return windows.first { $0.isKeyWindow } ?? windows.first
         }
 
         private func scheduleRetry() {
@@ -443,14 +503,54 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
             onLongPress()
         }
 
-        @objc private func handleEdgeRight(_ recognizer: UIScreenEdgePanGestureRecognizer) {
-            guard recognizer.state == .began else { return }
-            onEdgeRight()
+        /// Vuốt từ mép — TỰ PHÁT HIỆN (không dùng `UIScreenEdgePanGestureRecognizer`
+        /// vì bị hệ thống gate mất quyền ưu tiên trên window, xem chú thích ở
+        /// `BinTVEdgeSwipeRecognizer`). Mỗi lần vuốt kích hoạt TỐI ĐA 1 LẦN:
+        ///   • .began  : ghi toạ độ X bắt đầu, cập nhật dải mép theo màn hình;
+        ///   • .changed: vuốt NGANG (|x| > |y|·1.5) đủ `minTranslation`, điểm
+        ///               bắt đầu nằm trong dải mép và đúng hướng → kích hoạt;
+        ///   • kết thúc: reset cờ để lần vuốt sau hoạt động tiếp.
+        @objc private func handleEdgeSwipe(_ recognizer: BinTVEdgeSwipeRecognizer) {
+            guard let window = recognizer.view as? UIWindow else { return }
+
+            if recognizer.state == .began {
+                recognizer.startX = recognizer.location(in: window).x
+                recognizer.edgeZone = Self.edgeZone(for: window)   // xoay màn hình
+                recognizer.hasFired = false
+                return
+            }
+            if recognizer.state == .ended || recognizer.state == .cancelled
+                || recognizer.state == .failed {
+                recognizer.hasFired = false
+                return
+            }
+            guard recognizer.state == .changed, !recognizer.hasFired else { return }
+
+            let translate = recognizer.translation(in: window)
+            // Chỉ nhận vuốt NGANG — vuốt dọc vẫn là cuộn nội dung bình thường.
+            guard abs(translate.x) >= recognizer.minTranslation,
+                  abs(translate.x) > abs(translate.y) * 1.5 else { return }
+
+            let width = window.bounds.width
+            if recognizer.edge == .left
+                && recognizer.startX <= recognizer.edgeZone
+                && translate.x > 0 {
+                recognizer.hasFired = true
+                onEdgeLeft()                      // Back 1 bước
+                return
+            }
+            if recognizer.edge == .right
+                && recognizer.startX >= width - recognizer.edgeZone
+                && translate.x < 0 {
+                recognizer.hasFired = true
+                onEdgeRight()                     // Hiện menu
+            }
         }
 
-        @objc private func handleEdgeLeft(_ recognizer: UIScreenEdgePanGestureRecognizer) {
-            guard recognizer.state == .began else { return }
-            onEdgeLeft()
+        /// App quay lại foreground: gắn lại recognizer nếu window đã đổi
+        /// (sau khi phát video fullscreen, window tạm thời biến mất…).
+        @objc private func appDidBecomeActive() {
+            install()
         }
 
         // MARK: UIGestureRecognizerDelegate — tránh xung đột gesture
@@ -468,7 +568,7 @@ private struct BinTVWindowGestures: UIViewControllerRepresentable {
                 if Self.isControlOrTextInput(touch.view) { return false }
                 return true
             }
-            if gestureRecognizer is BinTVScreenEdgePanRecognizer {
+            if gestureRecognizer is BinTVEdgeSwipeRecognizer {
                 // Webview có swipe back/forward nội bộ (TUBE:
                 // allowsBackForwardNavigationGestures = true) → nhường để
                 // KHÔNG bị Back/Next 2 lần cho cùng một cái vuốt.

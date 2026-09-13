@@ -71,9 +71,9 @@ ok(re.search(r"isa = PBXResourcesBuildPhase", pbx) is not None, "có Resources b
 ok("Web in Resources" in pbx, "Web nằm trong Resources phase")
 
 print("\n=== T4.2 — Info.plist ↔ pbxproj ===")
-eq(plist["CFBundleVersion"], "221", "CFBundleVersion = 221 (bản Menu ẩn + Back cạnh trái + PHIM giữ trạng thái)")
+eq(plist["CFBundleVersion"], "222", "CFBundleVersion = 222 (Back cạnh trái = vuốt mép tự phát hiện)")
 cv = re.findall(r"CURRENT_PROJECT_VERSION = (\d+);", pbx)
-ok(len(cv) == 2 and all(v == "221" for v in cv), f"CURRENT_PROJECT_VERSION=221 cả 2 config (Debug/Release)", str(cv))
+ok(len(cv) == 2 and all(v == "222" for v in cv), f"CURRENT_PROJECT_VERSION=222 cả 2 config (Debug/Release)", str(cv))
 eq(plist["CFBundleShortVersionString"], re.findall(r"MARKETING_VERSION = ([\d.]+);", pbx)[0], "CFBundleShortVersionString khớp MARKETING_VERSION")
 eq(sorted(plist["UISupportedInterfaceOrientations"]),
    sorted(["UILandscapeLeftInterfaceOrientation", "UILandscapeRightInterfaceOrientation"]),
@@ -384,8 +384,15 @@ ok("guard !showingPlayer" in cvsrc, "menu không mở vô hình dưới sheet pl
 ok("guard !showMenu else { return }" in cvsrc, "toggle idempotent — không chớp ẩn/hiện 2 lần")
 ok("BinTVWindowGestures" in cvsrc and "window.addGestureRecognizer" in cvsrc,
    "gesture gắn TRỰC TIẾP trên UIWindow (không cần tìm UITabBarController)")
-ok("BinTVScreenEdgePanRecognizer" in cvsrc and "installEdgePan(.right" in cvsrc
-   and "installEdgePan(.left" in cvsrc, "edge-pan phải (menu) + trái (Back) trên window")
+# [build 222] TỰ PHÁT HIỆN vùng mép bằng UIPanGestureRecognizer — thay
+# UIScreenEdgePanGestureRecognizer (bị hệ thống gate mất quyền ưu tiên trên
+# UIWindow → triệu chứng thực tế: long-press chạy, vuốt cạnh trái KHÔNG chạy).
+ok("BinTVEdgeSwipeRecognizer" in cvsrc and "class BinTVEdgeSwipeRecognizer: UIPanGestureRecognizer" in cvsrc,
+   "vuốt mép = UIPanGestureRecognizer tự tính vùng mép (không dùng UIScreenEdgePanGestureRecognizer)")
+ok("UIScreenEdgePanGestureRecognizer" not in cvsrc_code,
+   "không còn dùng UIScreenEdgePanGestureRecognizer trong code (bị gate bởi hệ thống)")
+ok("installEdgeSwipe(.right" in cvsrc and "installEdgeSwipe(.left" in cvsrc,
+   "vuốt cạnh phải (menu) + cạnh trái (Back) được gắn trên window")
 ok("cancelsTouchesInView = false" in cvsrc and "delaysTouchesBegan = false" in cvsrc,
    "edge-pan không cướp touch webview/video (cancelsTouchesInView/delaysTouchesBegan = false)")
 ok("onEdgeRight: { toggleOverlayMenu() }" in cvsrc, "vuốt cạnh phải vào → hiện overlay menu (cách 2)")
@@ -396,6 +403,27 @@ ok("shouldReceive touch" in cvsrc and "enclosingWebView(touch.view)" in cvsrc,
    "delegate shouldReceive: nhận diện vùng WKWebView để nhường gesture")
 ok("allowsBackForwardNavigationGestures" in cvsrc,
    "nhường swipe back/forward nội bộ của webview (không Back 2 lần/1 vuốt)")
+# --- [build 222] bộ máy trạng thái vuốt mép ---
+swipe = cvsrc.split("@objc private func handleEdgeSwipe")[1].split("\n        }")[0]
+ok("state == .began" in swipe and "startX = recognizer.location(in: window).x" in swipe,
+   "vuốt: .began ghi toạ độ X bắt đầu")
+ok("abs(translate.x) >= recognizer.minTranslation" in swipe
+   and "abs(translate.x) > abs(translate.y) * 1.5" in swipe,
+   "vuốt: chỉ kích hoạt khi NGANG và đủ xa (vuốt dọc vẫn cuộn nội dung)")
+ok("startX <= recognizer.edgeZone" in swipe and "translate.x > 0" in swipe,
+   "vuốt cạnh TRÁI: bắt đầu trong dải mép + hướng sang phải → Back")
+ok("startX >= width - recognizer.edgeZone" in swipe and "translate.x < 0" in swipe,
+   "vuốt cạnh PHẢI: bắt đầu trong dải mép + hướng vào trong → hiện menu")
+ok(swipe.count("hasFired = true") == 2 and "!recognizer.hasFired" in swipe,
+   "mỗi lần vuốt kích hoạt ĐÚNG 1 LẦN (hasFired chặn lặp)")
+ok("recognizer.hasFired = false" in swipe,
+   "kết thúc/cancel vuốt → reset cờ (lần vuốt kế tiếp vẫn hoạt động)")
+ok("edgeZone(for: window)" in cvsrc and "min(max(width * 0.09, 30), 70)" in cvsrc,
+   "dải mép tự co theo màn hình (~9% bề rộng, kẹp 30–70pt)")
+ok("appDidBecomeActive" in cvsrc and "didBecomeActiveNotification" in cvsrc,
+   "gắn lại recognizer khi app trở lại foreground (window có thể đã đổi)")
+ok("private weak var installedWindow" in cvsrc and "rootViewController != nil" in cvsrc,
+   "chỉ gắn trên window thật của app (tránh window tạm thời của video fullscreen)")
 ok("candidate is UIControl || candidate is UITextInput" in cvsrc,
    "nhường long-press hệ thống trong UIControl/ô nhập liệu (chọn/paste)")
 ok("shouldRecognizeSimultaneouslyWith" in cvsrc, "không chặn recognizer khác (scroll/pinch/video)")
@@ -406,6 +434,8 @@ ok("if showMenu" in back and "showingPlayer" in back and "perform(tab: selectedT
    "Back đúng thứ tự: ẩn menu → đóng sheet → webview goBack → lùi tab trước đó")
 ok("if tabHistory.count > 1" in back, "Back lùi đúng lịch sử tab, không thoát app khi còn màn hình trước")
 ok("không còn mức nào phía trước" in back, "root = NO-OP tuyệt đối (không thoát app)")
+ok("UIImpactFeedbackGenerator" in back.split("if tabHistory.count > 1")[1] if "if tabHistory.count > 1" in back else False,
+   "root: rung xác nhận thao tác đã nhận (không đổi giao diện, không thoát app)")
 pwsrc = open(os.path.join(ROOT, "BinTV", "Phim", "PhimWebView.swift"), encoding="utf-8").read()
 ok("webViewWebContentProcessDidTerminate" in pwsrc and "webView.reload()" in pwsrc,
    "PHIM root cause màn đen: delegate CHÍNH THỨC WebContent process terminate → reload phục hồi")

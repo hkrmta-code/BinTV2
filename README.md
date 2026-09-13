@@ -226,3 +226,16 @@ global lẫn 2 edge-pan cũng không bao giờ được gắn.
   mirror state-machine của luồng menu/Back/PHIM). Swift parse-check toàn
   bộ file bằng toolchain Swift thật: PASS (không có macOS/UIKit → chưa
   compile/link; cổng xác nhận = GitHub Actions build 221).
+
+## Back cạnh trái: vuốt mép TỰ PHÁT HIỆN (build 222 / 2.4.2)
+
+`UIScreenEdgePanGestureRecognizer` gắn trên `UIWindow` bị hệ thống "gate"
+mất quyền ưu tiên ở vùng mép màn hình → triệu chứng thực tế: giữ màn hình
+hiện menu được, nhưng vuốt cạnh trái không Back. Thay bằng
+`BinTVEdgeSwipeRecognizer` (`UIPanGestureRecognizer` + tự tính vùng mép):
+bắt đầu trong dải `min(max(width×0.09, 30), 70)` pt sát mép, vuốt NGANG
+≥45pt (`|x| > |y|·1.5`) → Back (trái) / hiện menu (phải), **đúng 1 lần cho
+mỗi lần vuốt**. Vẫn gắn trên window (phủ cả sheet player), chỉ gắn trên
+window thật của app, gắn lại khi app trở lại foreground. Root Back: rung
+xác nhận, không thoát app. Tests: **462/462 PASS** (có T5.5 mô phỏng nhận
+diện vuốt).
