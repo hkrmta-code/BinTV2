@@ -100,6 +100,7 @@ on:
           - macos-15
           - self-hosted
 
+
 permissions:
   contents: read
 
