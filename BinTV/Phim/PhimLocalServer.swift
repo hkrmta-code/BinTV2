@@ -1128,6 +1128,9 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
             let lineCount = text.components(separatedBy: "\n").count
             text = Self.rewriteM3u8Urls(text, baseUrl: base, extraReferer: pending.extraReferer)
             rewritten = Data(text.utf8)
+            // Body đã đổi → bỏ Content-Length/Encoding cũ (nếu giữ lại, iOS
+            // cắt ngang playlist → không phát được).
+            headers = Self.stripStaleBodyHeaders(headers)
             let proxiedCount = text.components(separatedBy: "/proxy?url=").count - 1
             PhimDebugLog.step("M3U8", "rewrite", "ok",
                               "lines=\(lineCount) proxiedChildren=\(proxiedCount) base=\(PhimDebugLog.sanitizeURL(base))")
@@ -1149,6 +1152,7 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
             let length: Int
             if let data = rewritten { length = data.count }
             else { length = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int) ?? 0 }
+            headers = Self.stripStaleBodyHeaders(headers)
             headers.append(("Content-Length", String(length)))
             sendHeadOnly(pending.connection, code: code, headers: headers)
             try? FileManager.default.removeItem(at: fileURL)
@@ -1352,6 +1356,43 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
         return head
     }
 
+    /// [build 230 — ROOT CAUSE "iPhone KHÔNG phát được nguồn, Windows thì được"]
+    ///
+    /// Khi proxy REWRITE nội dung (m3u8), các header mô tả BODY CŨ trở nên SAI:
+    ///   • `Content-Length` của upstream NHỎ HƠN độ dài sau rewrite
+    ///     (`playlist_720p.m3u8` → `/proxy?url=https%3A%2F%2F…` dài hơn nhiều)
+    ///     → WebKit/AVFoundation trên iOS đọc đúng N byte rồi kết thúc =
+    ///     **playlist bị CẮT giữa chừng** → HLS parse lỗi → video.onerror →
+    ///     app báo "Không thể phát nguồn phim này trên TV".
+    ///     Chromium + hls.js trên Windows dễ tính hơn (bỏ qua sai lệch) nên
+    ///     bản Windows vẫn phát được — ĐÓ LÀ ĐÚNG KHÁC BIỆT HAI NỀN TẢNG.
+    ///   • `Content-Encoding` / `Transfer-Encoding` / `ETag` / `Content-MD5`
+    ///     cũng không còn mô tả body mới.
+    /// → Bỏ các header này để `sendFixed` tự gắn `Content-Length` ĐÚNG.
+    private static let staleBodyHeaders: Set<String> = [
+        "content-length", "content-encoding", "transfer-encoding", "etag", "content-md5"
+    ]
+
+    private static func stripStaleBodyHeaders(_ headers: [(String, String)]) -> [(String, String)] {
+        return headers.filter { !staleBodyHeaders.contains($0.0.lowercased()) }
+    }
+
+    /// Chỉ giữ 1 header cùng tên (tránh gửi 2 `Content-Length` — iOS coi là
+    /// response không hợp lệ và huỷ phiên phát).
+    private static func dedupeHeader(_ headers: [(String, String)], name: String) -> [(String, String)] {
+        let lowered = name.lowercased()
+        var out: [(String, String)] = []
+        var seen = false
+        for header in headers {
+            if header.0.lowercased() == lowered {
+                if seen { continue }
+                seen = true
+            }
+            out.append(header)
+        }
+        return out
+    }
+
     private func sendHeadOnly(_ connection: FdConnection, code: Int, headers: [(String, String)]) {
         let head = buildHead(code, headers: headers, includeLength: false)
         connection.send(content: Data(head.utf8), completion: { [weak self] _ in
@@ -1360,7 +1401,7 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
     }
 
     private func sendFixed(_ connection: FdConnection, code: Int, headers: [(String, String)], body: Data) {
-        var allHeaders = headers
+        var allHeaders = Self.dedupeHeader(headers, name: "Content-Length")
         if allHeaders.firstIndex(where: { $0.0.lowercased() == "content-length" }) == nil {
             allHeaders.append(("Content-Length", String(body.count)))
         }
@@ -1374,7 +1415,7 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
 
     private func sendFixed(_ connection: FdConnection, code: Int, headers: [(String, String)],
                            fileURL: URL, size: Int) {
-        var allHeaders = headers
+        var allHeaders = Self.dedupeHeader(headers, name: "Content-Length")
         if allHeaders.firstIndex(where: { $0.0.lowercased() == "content-length" }) == nil {
             allHeaders.append(("Content-Length", String(size)))
         }
