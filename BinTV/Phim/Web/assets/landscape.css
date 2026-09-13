@@ -92,8 +92,13 @@
    (932px - 118px sidebar) ≈ 814px nội dung -> 4 cột x ~190px. ---------- */
 .movie-grid { padding: 4px 0 18px; }
 .movie-card {
-    flex: 0 0 calc(25% - 12px);
-    margin: 0 6px 14px;
+    /* [build 225] flex-grow: 1 → các thẻ TỰ DÃN ra lấp kín phần thừa của mỗi
+       hàng (hết hẳn khoảng trống đen 2 bên, kể cả hàng cuối); max-width giữ
+       một thẻ không bao giờ phình quá nửa hàng (tránh thẻ khổng lồ khi hàng
+       cuối chỉ còn 1 phim). Poster vẫn 16/9 → KHÔNG méo, KHÔNG crop. */
+    flex: 1 1 calc(25% - 10px);
+    max-width: calc(50% - 10px);
+    margin: 0 5px 14px;
     border-width: 2px;
     border-radius: 9px;
 }
@@ -112,17 +117,17 @@
     -webkit-line-clamp: 2;
     height: auto;
     max-height: 2.4em;
-    margin: 7px 5px 0;
+    margin: 7px 6px 0;
     line-height: 1.2;
-    font-size: 14px;
+    font-size: 15px;
     text-shadow: none;
     overflow: hidden;
 }
 .movie-card-meta {
     position: static;
     height: auto;
-    margin: 3px 5px 3px;
-    font-size: 12px;
+    margin: 3px 6px 3px;
+    font-size: 13px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

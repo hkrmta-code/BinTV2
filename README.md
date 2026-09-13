@@ -239,3 +239,83 @@ mỗi lần vuốt**. Vẫn gắn trên window (phủ cả sheet player), chỉ 
 window thật của app, gắn lại khi app trở lại foreground. Root Back: rung
 xác nhận, không thoát app. Tests: **462/462 PASS** (có T5.5 mô phỏng nhận
 diện vuốt).
+
+## LIVE TV: sửa nút fullscreen (đen màn hình + dừng phát) — build 223 / 2.4.3
+
+Đang phát LIVE TV, bấm nút fullscreen (mũi tên 2 chiều) → video dừng và
+player đen. Hai nguyên nhân gốc, sửa cả hai:
+
+1. **Thiếu view-controller containment.** `GravityVideoPlayer` cũ là
+   `UIViewRepresentable` trả `coordinator.view` — lấy **view** của
+   `AVPlayerViewController` mà không bao giờ `addChild`. Nút fullscreen của
+   AVKit kích hoạt **full screen presentation** (thao tác cấp view
+   controller) ⇒ thiếu VC cha = vùng chứa không hiển thị ⇒ **đen**. Đổi sang
+   **`UIViewControllerRepresentable`** (SwiftUI tự lo containment).
+2. **AVKit pause player khi chuyển chế độ trình bày** (hành vi đã biết).
+   Coordinator nay làm `AVPlayerViewControllerDelegate`: nhớ trạng thái phát
+   (`rate > 0`) và gọi lại `play()` **sau** khi transition kết thúc (bỏ qua
+   khi `isCancelled`) — cả khi vào lẫn khi thoát fullscreen; PiP không tự
+   đóng player inline.
+
+Không tự gây gián đoạn: `update` chỉ gán lại player/gravity khi thật sự đổi
+(so bằng `rawValue`), và `dismantle` **không** tháo player. FIT/FILL, chế độ
+TV khóa ngang và việc dọn player khi đóng sheet giữ nguyên. Tests:
+**480/480 PASS** (T4.12 có 18 assertion mới).
+
+## Đồng bộ player chuẩn iOS + giao diện lưới PHIM + fix PHIM đen khi ở nền — build 224 / 2.4.4
+
+**1. Một player chuẩn iOS dùng chung.** `BinTVNativePlayer` =
+`UIViewControllerRepresentable` bọc `AVPlayerViewController` (đúng view
+controller nằm sau SwiftUI `VideoPlayer`, containment đầy đủ) → điều khiển
+gốc của iOS: phát/tạm dừng, tua, AirPlay, PiP, fullscreen. **Pinch 2 ngón**
+đổi chế độ xem: PHÓNG TO = **FIT → FILL → FULL** (mỗi bước 18% tỉ lệ, reset
+sau mỗi bước; FULL = `fullScreenCover` dùng CHUNG một `AVPlayer` nên không
+tải lại, không gián đoạn); THU NHỎ đi ngược lại. Pinch chạy đồng thời với
+gesture của AVKit (không cướp thao tác).
+- **Đã loại bỏ logic tự dựng:** xoá `phim_player_ui.js` (HUD player của
+  PHIM) và xoá thanh điều khiển tự dựng của LIVE TV — trùng chức năng với
+  điều khiển gốc + pinch. TUBE giữ nguyên WebKit native fullscreen (đã là
+  player chuẩn iOS; không cướp quyền YouTube sang AVPlayer vì URL có chữ ký,
+  dễ hỏng phát).
+- PHIM **không tự** bật fullscreen (`AUTO_FULLSCREEN = false`): player
+  fullscreen là lớp phủ của hệ thống → phụ đề/danh sách tập dạng DOM sẽ bị
+  ẩn. Vào player native bằng 1 chạm vào nút fullscreen chuẩn của iOS.
+
+**2. Giao diện tab PHIM:** 4 thẻ/hàng (từ 6), lưới tràn sát 2 viền màn hình
+(chỉ chừa safe-area), poster giữ đúng 16:9, **tên phim + năm sản xuất
+xuống dưới ảnh** (bỏ gradient phủ lên poster) → thẻ cao ≈160px (gấp ≈2,3
+lần), chữ to hơn.
+
+**3. Tab PHIM đen sau khi ra màn hình chính:** xử lý đúng 3 cơ chế gốc —
+(1) WebContent process chết lúc ở nền → **hoãn** reload tới khi app active
+(reload lúc nền không hoàn tất = đen); (2) socket server nội bộ bị đóng →
+đảm bảo server sống **trước** khi reload; (3) webview không vẽ lại → ép
+`setNeedsLayout/setNeedsDisplay` + đọc layout/`resize`. Reload chỉ khi thăm
+dò DOM xác nhận webview thật sự trống; còn nội dung thì chỉ vẽ lại, không
+reload (giữ nguyên phim đang xem).
+
+Tests: **515/515 PASS** (T4.13–T4.16 mới). JS inject kiểm bằng `node --check`.
+
+## PHIM: toàn màn hình (viewport) + thẻ phim dãn kín + sửa màn hình đen khi ở nền — build 225 / 2.4.5
+
+**A. PHIM không toàn màn hình / còn viền đen 2 bên — root cause là viewport.**
+`index.html` khai báo `width=1920,height=1080` (bố cục TV) nên trang bị thu nhỏ
+vừa màn hình iPhone (~764px trong 932px) → nội dung nhỏ + lộ ~84px đen mỗi
+bên. Script `viewportFixJS` chạy ở **document start** ép đúng
+`width=device-width, initial-scale=1, viewport-fit=cover` (và chặn zoom trang).
+
+**B. Thẻ phim:** `flex: 1 1 calc(25% - 10px)` — có `flex-grow` nên thẻ tự dãn
+lấp kín chiều ngang (cả hàng cuối), `max-width: calc(50% - 10px)` để không
+bao giờ phình quá nửa hàng; bỏ hẳn padding ngang; poster vẫn **16/9** (không
+méo, không crop); chữ tên 15px / năm 13px.
+
+**C. Màn hình đen khi ra Home rồi mở lại — mọi đường đều có hạn mức:**
+- **Watchdog 3s**: không chứng minh được webview sống **và đang vẽ** → nạp lại.
+- **Kiểm tra thật sự đang vẽ** bằng `callAsyncJavaScript` +
+  **`requestAnimationFrame`** (DOM sống nhưng không vẽ vẫn là đen — trường hợp
+  build 224 bỏ sót vì `evaluateJavaScript` có thể không bao giờ gọi về).
+- Ép vẽ lại: `setNeedsLayout/setNeedsDisplay` + **nudge scroll 1px**.
+- Tối đa 2 lần nạp lại mỗi lượt foreground; chứng minh được còn sống thì
+  **không reload** (giữ nguyên phim đang xem).
+
+Tests: **517/517 PASS** (T4.17–T4.18 mới). JS inject kiểm bằng `node --check`.

@@ -75,6 +75,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         // =================================================================
         configuration.allowsInlineMediaPlayback = true
         // Shim AndroidBridge — chạy TRƯỚC hls.min.js/tizen_shim.js/app.js.
+        // [build 225] ÉP viewport chuẩn thiết bị TRƯỚC mọi script của web app.
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.viewportFixJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.bridgeShimJS, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
@@ -414,6 +418,57 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     """
 
     // =====================================================================
+    // [FIX 2026-09-13 build 225 — PHIM KHÔNG TOÀN MÀN HÌNH / CÓ VIỀN ĐEN
+    //  2 BÊN]
+    //
+    // index.html khai báo <meta name="viewport" content="width=1920,height=1080">
+    // (bố cục TV của bản Electron/Android TV) và chỉ đổi sang viewport thiết
+    // bị bằng một đoạn script trong <head>. Khi WebKit đã chốt layout theo
+    // 1920x1080, trang bị thu nhỏ vừa màn hình iPhone (932x430 → ảnh
+    // ~764x430) => nội dung "nằm trong một vùng nhỏ" và LỘ RA ~84px ĐEN MỖI
+    // BÊN — đúng triệu chứng máy thật (LIVE TV/TUBE không bị vì chúng không
+    // dùng web app này).
+    //
+    // Cách sửa: script này chạy ở **document start** (TRƯỚC mọi script của
+    // web app) và gắn viewport chuẩn điện thoại NGAY KHI thẻ meta xuất hiện
+    // (hoặc tự tạo thẻ nếu chưa có). Có `viewport-fit=cover` để nội dung phủ
+    // kín cả vùng Dynamic Island, và chặn zoom trang (`maximum-scale=1`) để
+    // webview không tự phóng to/thu nhỏ sau khi app ở nền.
+    // =====================================================================
+
+    private static let viewportFixJS = """
+    (function () {
+        "use strict";
+        var CONTENT = "width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover";
+        function apply() {
+            try {
+                if (!document.head) { return false; }
+                var meta = document.querySelector('meta[name="viewport"]');
+                if (!meta) {
+                    meta = document.createElement('meta');
+                    meta.setAttribute('name', 'viewport');
+                    document.head.appendChild(meta);
+                }
+                if (meta.getAttribute('content') !== CONTENT) {
+                    meta.setAttribute('content', CONTENT);
+                }
+                return true;
+            } catch (e) { return false; }
+        }
+        if (!apply()) {
+            // <head> chưa tồn tại ở document-start → gắn NGAY khi nó xuất
+            // hiện (vẫn trước khi body được dựng → WebKit tính đúng viewport).
+            try {
+                var observer = new MutationObserver(function () {
+                    if (apply()) { observer.disconnect(); }
+                });
+                observer.observe(document, { childList: true, subtree: true });
+            } catch (e) {}
+        }
+    })();
+    """
+
+    // =====================================================================
     // [BinTV 2026-09-13 build 224] PLAYER CHUẨN iOS CHO TAB PHIM
     //
     // ĐÃ XOÁ phim_player_ui.js — lớp HUD tự dựng: tự ẩn overlay sau 3.5s,
@@ -667,6 +722,16 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     /// Process bị kết thúc TRONG LÚC app ở nền → hoãn phục hồi tới foreground.
     private var pendingRestoreAfterBackground = false
 
+    /// Watchdog: nếu không CHỨNG MINH được webview còn sống & đang vẽ trong
+    /// thời gian này thì coi như đã chết (màn hình đen) → nạp lại trang.
+    private var recoveryWatchdog: DispatchWorkItem?
+    /// Đã kết luận (sống hoặc đã nạp lại) cho lượt phục hồi hiện tại.
+    private var recoverySettled = false
+    /// Số lần phục hồi trong một lượt foreground (chống lặp vô hạn).
+    private var recoveryAttempts = 0
+    /// Hạn mức cứng của watchdog (giây).
+    private static let recoveryDeadline: TimeInterval = 3
+
     private func installLifecycleObservers() {
         let center = NotificationCenter.default
         let handler: (Notification) -> Void = { [weak self] _ in
@@ -680,21 +745,49 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             object: nil, queue: .main, using: handler))
     }
 
-    /// App vừa trở lại foreground/active: kiểm tra và phục hồi tab PHIM.
+    // ---------------------------------------------------------------------
+    // App vừa trở lại foreground/active: PHẢI chứng minh webview còn sống và
+    // đang VẼ, nếu không → nạp lại. Đây là điểm mấu chốt của bản 225:
+    // ở bản 224, nếu `evaluateJavaScript` KHÔNG BAO GIỜ gọi về (process đã
+    // chết / trang bị kẹt giữa chừng lúc ở nền) thì không có gì xảy ra cả →
+    // màn hình đen vĩnh viễn đúng như máy thật. Nay mọi đường đều có hạn mức.
+    // ---------------------------------------------------------------------
     private func handleAppDidReturnFromBackground() {
         guard started else { return }   // tab PHIM chưa từng mở → không làm gì
-        // (2) Server nội bộ phải sống TRƯỚC khi reload, nếu không reload sẽ
-        // rơi vào server chết → đen (đúng nguyên nhân số 2).
+        if recoveryWatchdog != nil { return }   // đang phục hồi rồi
         ensureServerAlive()
-        // (1) Process đã chết lúc ở nền → phục hồi ngay bây giờ (đã active).
         if pendingRestoreAfterBackground {
             pendingRestoreAfterBackground = false
             reloadPage(reason: "WebContent process bị kết thúc khi app ở nền")
             return
         }
-        // (3) Vẫn còn nội dung → ép vẽ lại + xác minh DOM thật sự sống.
+        beginForegroundRecovery()
+    }
+
+    /// Bắt đầu một lượt kiểm tra có HẠN MỨC: watchdog 3s + thăm dò DOM +
+    /// kiểm tra có thật sự vẽ khung hình hay không (requestAnimationFrame).
+    private func beginForegroundRecovery() {
+        recoverySettled = false
+        recoveryAttempts = 0
+        recoveryWatchdog?.cancel()
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.recoverySettled else { return }
+            self.recoverySettled = true
+            self.reloadPage(reason: "không chứng minh được webview còn sống/vẽ trong "
+                            + "\(Self.recoveryDeadline)s sau khi ở nền")
+        }
+        recoveryWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.recoveryDeadline,
+                                      execute: watchdog)
         repaintWebView()
         probeAndRestoreIfBlank()
+    }
+
+    /// Webview đã được chứng minh là sống & đang vẽ → huỷ watchdog.
+    private func settleRecovery() {
+        recoverySettled = true
+        recoveryWatchdog?.cancel()
+        recoveryWatchdog = nil
     }
 
     /// Socket nghe có thể bị hệ thống đóng lúc app ở nền → khởi lại nếu cần.
@@ -720,16 +813,22 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     private func repaintWebView() {
         webView.setNeedsLayout()
         webView.setNeedsDisplay()
+        // Nudge scroll 1px: kỹ thuật bắt WebKit vẽ lại khung hình khi webview
+        // bị "treo" sau khi app ở nền (không đổi nội dung, không mất trạng thái).
+        let offset = webView.scrollView.contentOffset
+        webView.scrollView.setContentOffset(CGPoint(x: offset.x, y: offset.y + 1), animated: false)
+        webView.scrollView.setContentOffset(offset, animated: false)
     }
 
     /// Hỏi thăm DOM: nếu webview trống/không phản hồi → nạp lại; nếu còn nội
-    /// dung → chỉ ép layout/paint (KHÔNG reload khi cache vẫn dùng được).
+    /// dung → kiểm tra tiếp xem có THẬT SỰ vẽ hay không.
     private func probeAndRestoreIfBlank() {
         // Hỏi DOM: readyState | số node con của body | href hiện tại.
         // Trả "ERR" nếu JS lỗi; mọi trường hợp khác cho biết webview còn sống.
         let probe = "(function(){try{return String(document.readyState||'')+'|'+String((document.body&&document.body.childElementCount)||0)+'|'+String(window.location.href||'')}catch(e){return 'ERR'}})()"
         webView.evaluateJavaScript(probe) { [weak self] result, error in
             guard let self = self else { return }
+            guard !self.recoverySettled else { return }
             let text = (result as? String) ?? ""
             let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
             let readyState = parts.count > 0 ? parts[0] : ""
@@ -740,11 +839,40 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             if blank {
                 self.reloadPage(reason: "webview trống/không phản hồi sau khi ở nền (readyState=\(readyState), children=\(children))")
             } else {
-                self.repaintWebView()
-                // Đọc layout + bắn resize: buộc WebKit vẽ lại khung hình.
-                self.webView.evaluateJavaScript(
-                    "void document.body.offsetHeight; window.dispatchEvent(new Event('resize'));"
-                ) { _, _ in }
+                // Còn nội dung — NHƯNG có thể vẫn đang hiển thị ĐEN (webview
+                // sống mà không vẽ). Phải kiểm tra thêm bằng rAF.
+                self.verifyPainting()
+            }
+        }
+    }
+
+    /// Chứng minh webview THẬT SỰ đang vẽ: `requestAnimationFrame` chỉ chạy
+    /// khi WebKit còn render; nếu không có khung hình nào trong 900ms → trang
+    /// đang "đen" dù DOM vẫn tồn tại → nạp lại.
+    private func verifyPainting() {
+        let js = """
+        return await new Promise(function (resolve) {
+            var done = false;
+            function finish(value) { if (!done) { done = true; resolve(value); } }
+            requestAnimationFrame(function () {
+                requestAnimationFrame(function () { finish("paint"); });
+            });
+            setTimeout(function () { finish("nopaint"); }, 900);
+        });
+        """
+        webView.callAsyncJavaScript(js, arguments: [:], in: nil, contentWorld: .page) { [weak self] result in
+            guard let self = self else { return }
+            guard !self.recoverySettled else { return }
+            switch result {
+            case .success(let value):
+                if let text = value as? String, text == "paint" {
+                    // Đang vẽ bình thường → giữ nguyên trạng thái, không reload.
+                    self.settleRecovery()
+                    return
+                }
+                self.reloadPage(reason: "không có khung hình nào được vẽ (rAF không chạy) sau khi ở nền")
+            case .failure(let error):
+                self.reloadPage(reason: "callAsyncJavaScript lỗi sau khi ở nền: \(error.localizedDescription)")
             }
         }
     }
@@ -752,6 +880,15 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     /// Nạp lại TRANG (không reload bừa): webview mất cả URL → load lại từ
     /// server; còn URL → reload (giữ localStorage, khôi phục nhanh).
     private func reloadPage(reason: String) {
+        recoverySettled = true
+        recoveryWatchdog?.cancel()
+        recoveryWatchdog = nil
+        guard recoveryAttempts < 2 else {
+            PhimDebugLog.step("WEBVIEW", "foregroundRestore", "STOP",
+                               "đã thử \(recoveryAttempts) lần — dừng, tránh lặp vô hạn")
+            return
+        }
+        recoveryAttempts += 1
         PhimDebugLog.step("WEBVIEW", "foregroundRestore", "RELOAD", reason)
         if webView.url == nil {
             loadPage()
@@ -759,58 +896,6 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             webView.reload()
         }
     }
-
-    // =====================================================================
-    // Audio session (âm thanh phim — độc lập với tab TUBE)
-    //
-    // Tab TUBE tự set AVAudioSession .playback khi tab hiện, nhưng nếu
-    // người dùng mở app → đi thẳng tab PHIM (chưa qua TUBE), session
-    // còn .soloAmbient mặc định → audio phim bị ảnh hưởng bởi silent
-    // switch. Set .playback ngay khi tab PHIM khởi server (cùng category
-    // / mode với TUBE — không xung đột).
-    // =====================================================================
-    func configureAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .moviePlayback, options: [])
-            try session.setActive(true)
-        } catch {
-            // Không set được thì app vẫn chạy ở foreground; chỉ mất phát nền.
-        }
-    }
-
-    // =====================================================================
-    // SAFE AREA (top) — inject chiều cao status bar THẬT vào web app
-    //
-    // Trên LANDSCAPE, status bar iPhone (giờ / pin / sóng / Dynamic
-    // Island) KHÔNG phải một phần của safe area (safeArea.top = 0), trong
-    // khi PhimView full-bleed (.ignoresSafeArea()) → web content tràn lên
-    // đè vào khu vực giờ/pin. Web app (landscape.css) giữ chỗ bằng biến
-    // CSS --bintv-status-bar-h; giá trị do SYSTEM trả ở RUNTIME
-    // (statusBarManager.statusBarFrame.height — đúng theo thiết bị +
-    // orientation, KHÔNG hard-code số).
-    // =====================================================================
-
-    private func injectStatusBarInset() {
-        // `statusBarManager` là OPTIONAL (UIStatusBarManager?) → phải chain
-        // với `?.` (compile error nếu thiếu: "value of optional type
-        // 'UIStatusBarManager?' must be unwrapped").
-        let height: CGFloat = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first?.statusBarManager?.statusBarFrame.height ?? 0
-        let js = "document.documentElement.style.setProperty('--bintv-status-bar-h', '\(Int(height.rounded()))px');"
-        webView.evaluateJavaScript(js) { _, _ in }
-    }
-
-    /// Wrapper public cho PhimWebViewContainer.updateUIView (re-inject
-    /// sau rotation/layout change).
-    func injectStatusBarInsetPublic() {
-        injectStatusBarInset()
-    }
-
-    // =====================================================================
-    // Navigation delegate — lỗi main frame → overlay "Thử lại"
-    // =====================================================================
 
     // ---------------------------------------------------------------------
     // [FIX 2026-09-12 — ROOT CAUSE "tab PHIM màn hình đen khi quay lại"]
