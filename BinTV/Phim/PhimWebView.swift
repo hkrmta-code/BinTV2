@@ -846,33 +846,38 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         }
     }
 
-    /// Chứng minh webview THẬT SỰ đang vẽ: `requestAnimationFrame` chỉ chạy
-    /// khi WebKit còn render; nếu không có khung hình nào trong 900ms → trang
-    /// đang "đen" dù DOM vẫn tồn tại → nạp lại.
+    /// Chứng minh webview THẬT SỰ đang vẽ: đếm khung hình bằng
+    /// `requestAnimationFrame` — rAF CHỈ chạy khi WebKit còn render, nên
+    /// "DOM còn sống mà không vẽ" (= màn hình đen) mới bị phát hiện.
+    ///
+    /// Dùng 2 bước `evaluateJavaScript` (API có từ iOS 8, chắc chắn đúng chữ
+    /// ký) thay vì `callAsyncJavaScript`: đặt bộ đếm → đọc lại sau 900ms.
     private func verifyPainting() {
-        let js = """
-        return await new Promise(function (resolve) {
-            var done = false;
-            function finish(value) { if (!done) { done = true; resolve(value); } }
-            requestAnimationFrame(function () {
-                requestAnimationFrame(function () { finish("paint"); });
-            });
-            setTimeout(function () { finish("nopaint"); }, 900);
-        });
+        // Bước 1: gắn bộ đếm khung hình (tự dừng sau 5 khung).
+        let install = """
+        window.__bintvPaint = 0;
+        (function tick() {
+            window.__bintvPaint = (window.__bintvPaint || 0) + 1;
+            if (window.__bintvPaint < 5) { requestAnimationFrame(tick); }
+        })();
         """
-        webView.callAsyncJavaScript(js, arguments: [:], in: nil, contentWorld: .page) { [weak self] result in
+        webView.evaluateJavaScript(install) { [weak self] _, _ in
             guard let self = self else { return }
-            guard !self.recoverySettled else { return }
-            switch result {
-            case .success(let value):
-                if let text = value as? String, text == "paint" {
-                    // Đang vẽ bình thường → giữ nguyên trạng thái, không reload.
-                    self.settleRecovery()
-                    return
+            // Bước 2: đọc lại sau 900ms — nếu WebKit đang vẽ, bộ đếm đã tăng.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+                guard let self = self else { return }
+                guard !self.recoverySettled else { return }
+                self.webView.evaluateJavaScript("String(window.__bintvPaint || 0)") { [weak self] value, error in
+                    guard let self = self else { return }
+                    guard !self.recoverySettled else { return }
+                    let frames = Int((value as? String) ?? "") ?? 0
+                    if error == nil && frames >= 2 {
+                        // Đang vẽ bình thường → giữ nguyên, KHÔNG reload.
+                        self.settleRecovery()
+                    } else {
+                        self.reloadPage(reason: "không có khung hình nào được vẽ (rAF không chạy, frames=\(frames)) sau khi ở nền")
+                    }
                 }
-                self.reloadPage(reason: "không có khung hình nào được vẽ (rAF không chạy) sau khi ở nền")
-            case .failure(let error):
-                self.reloadPage(reason: "callAsyncJavaScript lỗi sau khi ở nền: \(error.localizedDescription)")
             }
         }
     }
@@ -896,6 +901,58 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
             webView.reload()
         }
     }
+
+    // =====================================================================
+    // Audio session (âm thanh phim — độc lập với tab TUBE)
+    //
+    // Tab TUBE tự set AVAudioSession .playback khi tab hiện, nhưng nếu
+    // người dùng mở app → đi thẳng tab PHIM (chưa qua TUBE), session
+    // còn .soloAmbient mặc định → audio phim bị ảnh hưởng bởi silent
+    // switch. Set .playback ngay khi tab PHIM khởi server (cùng category
+    // / mode với TUBE — không xung đột).
+    // =====================================================================
+    func configureAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .moviePlayback, options: [])
+            try session.setActive(true)
+        } catch {
+            // Không set được thì app vẫn chạy ở foreground; chỉ mất phát nền.
+        }
+    }
+
+    // =====================================================================
+    // SAFE AREA (top) — inject chiều cao status bar THẬT vào web app
+    //
+    // Trên LANDSCAPE, status bar iPhone (giờ / pin / sóng / Dynamic
+    // Island) KHÔNG phải một phần của safe area (safeArea.top = 0), trong
+    // khi PhimView full-bleed (.ignoresSafeArea()) → web content tràn lên
+    // đè vào khu vực giờ/pin. Web app (landscape.css) giữ chỗ bằng biến
+    // CSS --bintv-status-bar-h; giá trị do SYSTEM trả ở RUNTIME
+    // (statusBarManager.statusBarFrame.height — đúng theo thiết bị +
+    // orientation, KHÔNG hard-code số).
+    // =====================================================================
+
+    private func injectStatusBarInset() {
+        // `statusBarManager` là OPTIONAL (UIStatusBarManager?) → phải chain
+        // với `?.` (compile error nếu thiếu: "value of optional type
+        // 'UIStatusBarManager?' must be unwrapped").
+        let height: CGFloat = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first?.statusBarManager?.statusBarFrame.height ?? 0
+        let js = "document.documentElement.style.setProperty('--bintv-status-bar-h', '\(Int(height.rounded()))px');"
+        webView.evaluateJavaScript(js) { _, _ in }
+    }
+
+    /// Wrapper public cho PhimWebViewContainer.updateUIView (re-inject
+    /// sau rotation/layout change).
+    func injectStatusBarInsetPublic() {
+        injectStatusBarInset()
+    }
+
+    // =====================================================================
+    // Navigation delegate — lỗi main frame → overlay "Thử lại"
+    // =====================================================================
 
     // ---------------------------------------------------------------------
     // [FIX 2026-09-12 — ROOT CAUSE "tab PHIM màn hình đen khi quay lại"]

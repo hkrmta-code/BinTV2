@@ -319,3 +319,20 @@ méo, không crop); chữ tên 15px / năm 13px.
   **không reload** (giữ nguyên phim đang xem).
 
 Tests: **517/517 PASS** (T4.17–T4.18 mới). JS inject kiểm bằng `node --check`.
+
+## Sửa lỗi biên dịch CI của build 225 + guard chống lặp lại — build 226 / 2.4.6
+
+Run CI của 225 lỗi `exit 65` vì **2 nguyên nhân**:
+1. Patch thay thế theo vùng đã **xoá nhầm 3 hàm** (`configureAudioSession`,
+   `injectStatusBarInset`, `injectStatusBarInsetPublic`) → "cannot find … in
+   scope". Đã khôi phục nguyên vẹn từ bản 224 (đối chiếu byte) và rà lại toàn
+   bộ danh sách khai báo.
+2. Gọi sai chữ ký `callAsyncJavaScript` (thiếu nhãn `in` thứ hai của
+   `contentWorld`) → "extra trailing closure passed in call". Đã bỏ hẳn API
+   này, kiểm tra "đang vẽ" bằng **2 bước `evaluateJavaScript`**: gắn bộ đếm
+   `requestAnimationFrame` → đọc lại sau 900 ms (≥2 khung = đang vẽ).
+
+**Guard mới T4.19:** `baseline_symbols.json` lưu 640 khai báo của 20 file
+Swift (tạo bằng `tests/mock-e2e/make_baseline.py`); test soi từng khai báo và
+**fail ngay** nếu có cái biến mất khỏi mã nguồn (kể cả khi bị đẩy vào
+comment). Guard tự kiểm chứng bằng cách giả lập xoá 1 hàm.
