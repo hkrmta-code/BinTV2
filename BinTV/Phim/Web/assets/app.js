@@ -203,6 +203,10 @@
     var moviePlayerEpisodeSwitchInProgress = false;
     var movieManifestUrl = "";
     var movieBaseUrl = "";
+    // [build 229] DANH SÁCH ADDON STREMIO ĐANG DÙNG (từ JSONBin:
+    // target_urls / target_url). Mỗi phần tử: {baseUrl, manifest, name, id}.
+    // movieBaseUrl vẫn giữ = addon đầu tiên (tương thích ngược toàn bộ code cũ).
+    var movieAddons = [];
     var movieManifest = null;
     var movieCatalogs = [];
     var movieAllCatalogs = [];
@@ -1542,6 +1546,51 @@
         return payload.target_url.replace(/^\s+|\s+$/g, "");
     }
 
+    // [build 229] Base URL của addon SỞ HỮU catalog (hỗ trợ nhiều addon).
+    // Catalog được gắn `_addon` lúc bootstrap; nếu thiếu → dùng addon đầu.
+    function catalogAddonBase(catalog) {
+        var base = catalog && (catalog._addon || catalog._bintvAddonBase);
+        if (typeof base === "string" && base) return base;
+        if (catalog && catalog._bintvMemberCatalogs && catalog._bintvMemberCatalogs.length) {
+            var first = catalog._bintvMemberCatalogs[0];
+            var firstBase = first && (first._addon || first._bintvAddonBase);
+            if (typeof firstBase === "string" && firstBase) return firstBase;
+        }
+        return movieBaseUrl;
+    }
+
+    // [build 229] Gộp catalog/meta của NHIỀU addon thành 1 manifest thống
+    // nhất. Mỗi catalog giữ nguyên cấu trúc chuẩn Stremio + thêm `_addon`
+    // (base URL của addon sở hữu) để mọi truy vấn sau dùng đúng nguồn.
+    function mergeMovieAddonManifests(addons) {
+        var merged = { id: "", version: "", name: "", description: "",
+                       resources: [], types: [], catalogs: [], idPrefixes: [] };
+        var seenCatalog = {};
+        for (var i = 0; i < addons.length; i++) {
+            var addon = addons[i];
+            var manifest = addon && addon.manifest ? addon.manifest : {};
+            if (!merged.name && manifest.name) merged.name = manifest.name;
+            if (!merged.id && manifest.id) merged.id = manifest.id;
+            if (Array.isArray(manifest.resources)) merged.resources = merged.resources.concat(manifest.resources);
+            if (Array.isArray(manifest.types)) merged.types = merged.types.concat(manifest.types);
+            if (Array.isArray(manifest.idPrefixes)) merged.idPrefixes = merged.idPrefixes.concat(manifest.idPrefixes);
+            var catalogs = Array.isArray(manifest.catalogs) ? manifest.catalogs : [];
+            for (var j = 0; j < catalogs.length; j++) {
+                var catalog = catalogs[j];
+                if (!catalog || !catalog.id) continue;
+                var key = String(addon.baseUrl) + "|" + String(catalog.type || "") + "|" + String(catalog.id);
+                if (seenCatalog[key]) continue;
+                seenCatalog[key] = true;
+                var copy = {};
+                for (var k in catalog) if (Object.prototype.hasOwnProperty.call(catalog, k)) copy[k] = catalog[k];
+                copy._addon = addon.baseUrl;
+                copy._addonName = manifest.name || "";
+                merged.catalogs.push(copy);
+            }
+        }
+        return merged;
+    }
+
     function isValidMovieTargetUrl(url) {
         if (!url) return false;
         try {
@@ -1874,7 +1923,7 @@
             var members = isMergedMovieCatalog(list[i]) ? list[i]._bintvMemberCatalogs : [list[i]];
             for (var memberIndex = 0; memberIndex < members.length; memberIndex++) {
                 var member = members[memberIndex];
-                var identity = getMovieCatalogIdentity(member, movieBaseUrl);
+                var identity = getMovieCatalogIdentity(member, catalogAddonBase(member));
                 if (!member || seen[identity]) continue;
                 seen[identity] = true;
                 expanded.push(member);
@@ -2193,11 +2242,11 @@
                     if (cachedEntry) {
                         finishOne(catalogIndex, catalog, cachedEntry.metas, false);
                         if (Date.now() - cachedEntry.updatedAt > MOVIE_CATALOG_BACKGROUND_REFRESH_AGE) {
-                            fetchMovieCatalogShared(catalog, movieBaseUrl, function () {}, function () {});
+                            fetchMovieCatalogShared(catalog, catalogAddonBase(catalog), function () {}, function () {});
                         }
                         return;
                     }
-                    fetchMovieCatalogShared(catalog, movieBaseUrl, function (metas) {
+                    fetchMovieCatalogShared(catalog, catalogAddonBase(catalog), function (metas) {
                         finishOne(catalogIndex, catalog, metas, false);
                     }, function () { finishOne(catalogIndex, catalog, null, true); });
                 })(nextIndex++);
@@ -2311,16 +2360,46 @@
             return;
         }
         movieStreamRequestInFlight[identity] = [{ success: success, failure: failure }];
-        requestJson(buildMovieResourceUrl("stream", type, itemId), MOVIE_REQUEST_TIMEOUT, function (data) {
-            var streams = data && Array.isArray(data.streams) ? data.streams : [];
+
+        function notify(streams) {
             var listeners = movieStreamRequestInFlight[identity] || [];
             delete movieStreamRequestInFlight[identity];
             for (var i = 0; i < listeners.length; i++) try { listeners[i].success(streams.slice(0)); } catch (callbackError) {}
-        }, function (error) {
+        }
+        function notifyFailure(error) {
             var listeners = movieStreamRequestInFlight[identity] || [];
             delete movieStreamRequestInFlight[identity];
             for (var i = 0; i < listeners.length; i++) try { listeners[i].failure(error); } catch (callbackError) {}
-        });
+        }
+
+        // [build 229] HỎI TẤT CẢ ADDON phù hợp (idPrefixes + resources), gộp
+        // kết quả, phân loại theo chuẩn Stremio và gỡ trùng theo URL.
+        // Thứ tự do Stremio.rankStreams sắp: phát được trước (HLS/MP4...).
+        if (window.Stremio && typeof window.Stremio.resolveStreams === "function" && movieAddons.length) {
+            var requestTypes = [String(type || "movie")];
+            if (type === "tv") requestTypes = ["tv", "movie"];        // addon IPTV gán type movie
+            else if (type === "movie") requestTypes = ["movie", "tv"];
+            window.Stremio.resolveStreams(movieAddons, { type: type, types: requestTypes, id: itemId },
+                function (url, ok, fail) { requestJson(url, MOVIE_REQUEST_TIMEOUT, ok, fail); },
+                function (classified) {
+                    var seen = {};
+                    var streams = [];
+                    for (var i = 0; i < classified.length; i++) {
+                        var item = classified[i] || {};
+                        var key = item.url || item.magnet || (item.youtubeId ? "yt:" + item.youtubeId : "") || ("#" + i);
+                        if (!key || seen[key]) continue;
+                        seen[key] = true;
+                        streams.push(item.raw || item);
+                    }
+                    try { phimLog("fetchMovieStreamsShared: " + classified.length + " classified → " + streams.length + " unique", { type: type, id: itemId }); } catch (e) {}
+                    notify(streams);
+                });
+            return;
+        }
+
+        requestJson(buildMovieResourceUrl("stream", type, itemId), MOVIE_REQUEST_TIMEOUT, function (data) {
+            notify(data && Array.isArray(data.streams) ? data.streams : []);
+        }, notifyFailure);
     }
 
     function classifyMovieItem(item, fallbackType, done) {
@@ -2621,7 +2700,7 @@
             classifyCandidates();
             return;
         }
-        fetchMovieCatalogShared(pairedCatalog, movieBaseUrl, function (pairedMetas) {
+        fetchMovieCatalogShared(pairedCatalog, catalogAddonBase(pairedCatalog), function (pairedMetas) {
             if (token !== movieCatalogLoadToken) return;
             candidates = candidates.concat(pairedMetas);
             classifyCandidates();
@@ -2830,7 +2909,8 @@
     }
 
     function buildMovieCatalogSearchUrl(catalog, query) {
-        return movieBaseUrl + "/catalog/" + encodeURIComponent(catalog.type) + "/" + encodeURIComponent(catalog.id) + "/search=" + encodeURIComponent(query) + ".json";
+        // [build 229] Dùng base của addon SỞ HỮU catalog → tìm trên mọi nguồn.
+        return catalogAddonBase(catalog) + "/catalog/" + encodeURIComponent(catalog.type) + "/" + encodeURIComponent(catalog.id) + "/search=" + encodeURIComponent(query) + ".json";
     }
 
     function movieCatalogSupportsSearch(catalog) {
@@ -4193,7 +4273,7 @@
                     (function (task) {
                         activeTasks++;
                         if (task.metas) { classifyMergedTask(task, task.metas); return; }
-                        fetchMovieCatalogShared(task.catalog, movieBaseUrl, function (metas) { classifyMergedTask(task, metas); }, function () { finishMergedTask(task, []); });
+                        fetchMovieCatalogShared(task.catalog, catalogAddonBase(task.catalog), function (metas) { classifyMergedTask(task, metas); }, function () { finishMergedTask(task, []); });
                     })(tasks[nextTaskIndex++]);
                 }
             }
@@ -4569,30 +4649,74 @@
         movieStreamFallback = null;
     }
 
+    // [build 229] Thông báo RÕ NGUYÊN NHÂN khi không có nguồn phát được
+    // (trước đây chỉ hiện chung chung "Không tìm thấy nguồn phát tương thích").
+    function describeUnplayableStreams(classified) {
+        var list = Array.isArray(classified) ? classified : [];
+        if (!list.length) return "Không tìm thấy nguồn phát tương thích";
+        var torrent = 0, external = 0, youtube = 0;
+        for (var i = 0; i < list.length; i++) {
+            var kind = list[i] && list[i].kind;
+            if (kind === "torrent") torrent++;
+            else if (kind === "external") external++;
+            else if (kind === "youtube") youtube++;
+        }
+        if (torrent) return "Nguồn hiện chỉ có torrent (P2P) — iPhone không thể phát trực tiếp; hãy cấu hình debrid (vd. TorBox) cho addon này";
+        if (external) return "Nguồn yêu cầu mở bằng ứng dụng/trình duyệt ngoài";
+        if (youtube) return "Nguồn YouTube — hãy mở bằng tab TUBE";
+        return "Không tìm thấy nguồn phát tương thích (" + list.length + " nguồn, không nguồn nào phát được trên iPhone)";
+    }
+
     function loadMovieStreams(type, id, title, subtitleContext) {
         showMovieStatus("Đang tìm nguồn phát…", false);
         fetchMovieStreamsShared(type, id, function (streams) {
             if (!subtitleContext) subtitleContext = { id: id, videoId: id, type: type, name: title || "Phim" };
+            // [build 229] PHÂN LOẠI theo chuẩn Stremio: url (HLS/MP4) · ytId ·
+            // infoHash (torrent) · externalUrl + headers (Referer…). Chỉ những
+            // stream PHÁT ĐƯỢC trên iOS mới được đưa vào danh sách thử.
+            var classified = [];
+            var playable = [];
+            if (window.Stremio && typeof window.Stremio.classifyStream === "function") {
+                for (var ci = 0; ci < streams.length; ci++) {
+                    var cInfo = window.Stremio.classifyStream(streams[ci]);
+                    if (!cInfo) continue;
+                    classified.push(cInfo);
+                    if (cInfo.playable && cInfo.url) playable.push(cInfo);
+                }
+            } else {
+                for (var cj = 0; cj < streams.length; cj++) {
+                    if (streams[cj] && typeof streams[cj].url === "string" && isValidMovieTargetUrl(streams[cj].url)) {
+                        playable.push({ url: streams[cj].url, headers: {}, raw: streams[cj] });
+                    }
+                }
+            }
+            // Gắn Referer (behaviorHints.headers) vào URL: app đã có sẵn cơ
+            // chế đọc `referer=` trong query để forward qua /proxy.
+            var validStreams = [];
+            for (var pi = 0; pi < playable.length; pi++) {
+                var chosen = playable[pi];
+                var chosenUrl = chosen.url;
+                var chosenRef = chosen.headers && (chosen.headers.Referer || chosen.headers.referer);
+                if (chosenRef && String(chosenUrl).indexOf("referer=") === -1) {
+                    chosenUrl = String(chosenUrl) + (String(chosenUrl).indexOf("?") === -1 ? "?" : "&") + "referer=" + encodeURIComponent(chosenRef);
+                }
+                validStreams.push({ url: chosenUrl, name: chosen.name || "", title: chosen.title || "", raw: chosen.raw || null });
+            }
             if (type === "tv") {
-                var validatedStreams = subtitleContext && Array.isArray(subtitleContext._bintvTvValidatedStreams) ? subtitleContext._bintvTvValidatedStreams : streams;
-                if (startMovieTvPlaybackWithFallback(validatedStreams, title || "Truyền hình", subtitleContext)) return;
+                var tvStreams = validStreams;
+                if (!tvStreams.length && subtitleContext && Array.isArray(subtitleContext._bintvTvValidatedStreams)) tvStreams = subtitleContext._bintvTvValidatedStreams;
+                if (!tvStreams.length) tvStreams = streams;
+                if (startMovieTvPlaybackWithFallback(tvStreams, title || "Truyền hình", subtitleContext)) return;
                 moviePlayerEpisodeSwitchInProgress = false;
-                showMovieStatus("Link truyền hình hiện không hoạt động", true);
+                showMovieStatus(!validStreams.length ? describeUnplayableStreams(classified) : "Link truyền hình hiện không hoạt động", true);
                 return;
             }
             clearMovieTvPlaybackFallback();
-            // [Phim standalone 2026-09] Loc va luu tat ca stream hop le de
-            // fallback khi stream dau tien loi (vd key sc.k-20.xyz het han).
-            var validStreams = [];
-            for (var i = 0; i < streams.length; i++) {
-                if (streams[i] && typeof streams[i].url === "string" && isValidMovieTargetUrl(streams[i].url)) {
-                    validStreams.push(streams[i]);
-                }
-            }
             if (!validStreams.length) {
                 moviePlayerEpisodeSwitchInProgress = false;
-                if (moviePlayerOpen) updateMoviePlayerStatus("Không tìm thấy nguồn phát tương thích");
-                else showMovieStatus("Không tìm thấy nguồn phát tương thích", true);
+                var reason = describeUnplayableStreams(classified);
+                if (moviePlayerOpen) updateMoviePlayerStatus(reason);
+                else showMovieStatus(reason, true);
                 return;
             }
             // Luu state de fallback khi stream hien tai loi
@@ -5950,14 +6074,40 @@
             try { phimLog("fetchMovieBootstrapShared: config response received"); } catch (e) {}
             var targetUrl = normalizeMovieManifestUrl(extractMovieTargetUrl(data));
             try { phimLog("fetchMovieBootstrapShared: targetUrl extracted", { targetUrl: targetUrl }); } catch (e) {}
-            if (!targetUrl) { finishFailure(new Error("Cấu hình Phim không có target_url")); return; }
-            if (!isValidMovieTargetUrl(targetUrl)) { finishFailure(new Error("target_url của Phim không hợp lệ")); return; }
-            try { phimLog("fetchMovieBootstrapShared: manifest request start", targetUrl.substring(0, 100)); } catch (e) {}
-            requestJson(targetUrl, MOVIE_REQUEST_TIMEOUT, function (manifest) {
-                try { phimLog("fetchMovieBootstrapShared: manifest response received", { catalogs: manifest && Array.isArray(manifest.catalogs) ? manifest.catalogs.length : "invalid" }); } catch (e) {}
-                if (!manifest || !Array.isArray(manifest.catalogs)) { finishFailure(new Error("Manifest Phim không hợp lệ")); return; }
-                finishSuccess(cacheMovieBootstrap(targetUrl, manifest));
-            }, function (err) { try { phimLog("fetchMovieBootstrapShared: manifest request failed", err && err.message); } catch (e) {} finishFailure(err); });
+            // [build 229] ĐỌC TOÀN BỘ NGUỒN: ưu tiên `target_urls` (mảng),
+            // fallback `target_url` (tương thích cấu hình cũ). Lớp Stremio tự
+            // nhận diện mọi dạng lồng nhau → KHÔNG hard-code URL nào.
+            var manifestUrls = [];
+            if (window.Stremio && typeof window.Stremio.extractManifestUrls === "function") {
+                try { manifestUrls = window.Stremio.extractManifestUrls(data) || []; } catch (extractError) { manifestUrls = []; }
+            }
+            if (!manifestUrls.length && targetUrl) manifestUrls = [targetUrl];
+            if (targetUrl && manifestUrls.indexOf(targetUrl) === -1) manifestUrls.unshift(targetUrl);
+            if (!manifestUrls.length) { finishFailure(new Error("Cấu hình Phim không có target_url/target_urls")); return; }
+            try { phimLog("fetchMovieBootstrapShared: " + manifestUrls.length + " addon url(s)", manifestUrls); } catch (e) {}
+            if (!window.Stremio || typeof window.Stremio.loadAddons !== "function") {
+                // Không có lớp Stremio → giữ nguyên hành vi cũ (1 addon).
+                if (!isValidMovieTargetUrl(targetUrl)) { finishFailure(new Error("target_url của Phim không hợp lệ")); return; }
+                requestJson(targetUrl, MOVIE_REQUEST_TIMEOUT, function (manifest) {
+                    if (!manifest || !Array.isArray(manifest.catalogs)) { finishFailure(new Error("Manifest Phim không hợp lệ")); return; }
+                    finishSuccess(cacheMovieBootstrap(targetUrl, manifest));
+                }, function (err) { try { phimLog("fetchMovieBootstrapShared: manifest request failed", err && err.message); } catch (e) {} finishFailure(err); });
+                return;
+            }
+            // Nạp TẤT CẢ addon song song. Addon lỗi/timeout chỉ bị BỎ QUA,
+            // không ảnh hưởng các addon còn lại.
+            window.Stremio.loadAddons(manifestUrls, function (url, ok, fail) {
+                requestJson(url, MOVIE_REQUEST_TIMEOUT, ok, fail);
+            }, function (addons) {
+                try { phimLog("fetchMovieBootstrapShared: loaded " + addons.length + " addon(s)"); } catch (e) {}
+                if (!addons.length) { finishFailure(new Error("Không nạp được addon Phim nào")); return; }
+                movieAddons = addons.slice();
+                movieBaseUrl = addons[0].baseUrl;                 // tương thích ngược
+                var merged = mergeMovieAddonManifests(addons);    // gộp catalog mọi nguồn
+                if (!merged.catalogs || !merged.catalogs.length) { finishFailure(new Error("Manifest Phim không hợp lệ")); return; }
+                try { phimLog("fetchMovieBootstrapShared: merged catalogs", { count: merged.catalogs.length }); } catch (e) {}
+                finishSuccess(cacheMovieBootstrap(addons[0].baseUrl, merged));
+            });
         }, function (err) { try { phimLog("fetchMovieBootstrapShared: config request failed", err && err.message); } catch (e) {} finishFailure(err); });
     }
 

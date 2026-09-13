@@ -354,3 +354,24 @@ comment). Guard tự kiểm chứng bằng cách giả lập xoá 1 hàm.
   nguyên nhân: gỡ class ẩn → làm mới bằng chính luồng web app (click lại danh
   mục, giữ trạng thái) → nạp lại bỏ cache (+ kiểm tra `/health`, nối lại
   listener nếu socket chết) → tối đa 3 lần → overlay "Thử lại".
+
+### Build 229 (2.4.9) — Module PHIM theo chuẩn Stremio addon (đa nguồn)
+
+- **File mới `BinTV/Phim/Web/assets/stremio.js`**: client Stremio thuần giao thức —
+  không chứa URL nào (đã có assertion kiểm chứng). Nhận diện manifest/catalog/meta/stream
+  theo chuẩn, phân loại mọi loại stream (`url` HLS/mp4 · `ytId` · `infoHash`/torrent →
+  magnet · `externalUrl` · `behaviorHints.headers`), dùng `idPrefixes`/`resources` để
+  biết addon nào phục vụ id nào.
+- **JSONBin**: ưu tiên `target_urls` (mảng), fallback `target_url` (tương thích cấu hình
+  cũ), quét đệ quy mọi dạng lồng nhau → sửa `target_urls` là app tự nhận nguồn mới,
+  không cần build lại.
+- **Nạp song song + chịu lỗi**: một addon lỗi/timeout bị bỏ qua, không ảnh hưởng các addon khác.
+- **Gộp**: catalog của mọi addon thành **một danh sách PHIM** (mỗi catalog nhớ `_addon`);
+  **tìm kiếm** chạy trên tất cả addon (`/catalog/<type>/<id>/search=<q>.json`);
+  danh sách kết quả được **khử trùng** rồi **sắp xếp theo năm sản xuất** bằng đúng
+  logic cũ (`sortMovieItemsByProductionYear` — không đổi).
+- **Stream**: hỏi TẤT CẢ addon phù hợp, gộp + gỡ trùng + ưu tiên nguồn phát được,
+  tự gắn `Referer` từ `behaviorHints.headers` vào proxy. Khi không phát được sẽ báo
+  **đúng nguyên nhân** (torrent cần debrid / YouTube / mở ngoài) thay vì chung chung.
+- Kiểm chứng: `node tests/mock-e2e/run_all.js` → T1–T5 **579/579**;
+  `node tests/stremio-e2e/run.js` (dữ liệu thật) → **44/44** (có trong T6 của run_all).
