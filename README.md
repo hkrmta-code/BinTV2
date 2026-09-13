@@ -336,3 +336,21 @@ Run CI của 225 lỗi `exit 65` vì **2 nguyên nhân**:
 Swift (tạo bằng `tests/mock-e2e/make_baseline.py`); test soi từng khai báo và
 **fail ngay** nếu có cái biến mất khỏi mã nguồn (kể cả khi bị đẩy vào
 comment). Guard tự kiểm chứng bằng cách giả lập xoá 1 hàm.
+
+### Build 228 (2.4.8) — PHIM toàn màn hình + lưới phim + hết màn hình đen
+
+- **Toàn màn hình PHIM (root cause):** `PhimLocalServer` **viết lại
+  `<meta name="viewport">` ngay trong HTML trả về** (`width=device-width,
+  viewport-fit=cover`) — không dùng script chạy sau, không phụ thuộc cache.
+- **Lưới phim (root cause):** CSS được **tiêm từ mã Swift** (`layoutFixJS` mỗi
+  lần nạp trang, `!important`) vì file CSS trong bundle có thể stale/cache:
+  4 thẻ/hàng + `flex-grow` dãn kín, bỏ padding ngang, sidebar 100px, lề an toàn
+  ghỉm tối đa 20px, poster **16/9 + `object-fit:cover`** (hết letterbox, không
+  méo), tên + năm nằm dưới ảnh.
+  → iPhone 14 Pro Max ngang: thẻ **116pt → 190pt** (+64%).
+- **Hết màn hình đen (root cause):** lưới render 0 thẻ trong khi DOM vẫn sống
+  nên mọi kiểm tra "còn sống" cũ đều vô tác dụng. Cơ chế mới **đo trạng thái
+  render thật** (số thẻ / `player-active` / bề rộng lưới) rồi xử lý theo
+  nguyên nhân: gỡ class ẩn → làm mới bằng chính luồng web app (click lại danh
+  mục, giữ trạng thái) → nạp lại bỏ cache (+ kiểm tra `/health`, nối lại
+  listener nếu socket chết) → tối đa 3 lần → overlay "Thử lại".

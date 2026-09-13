@@ -99,6 +99,10 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
         configuration.userContentController.addUserScript(
             WKUserScript(source: Self.nativePlayerJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
+        // [build 228] CSS bố cục PHIM — TIÊM TỪ SWIFT (không phụ thuộc file).
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.layoutFixJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        )
         webView = WKWebView(frame: .zero, configuration: configuration)
         #if DEBUG
         // Safari Web Inspector attach được vào webview (dev build).
@@ -418,6 +422,92 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     """
 
     // =====================================================================
+    // [build 228 — ROOT CAUSE "thẻ phim không dãn/toàn màn hình"]
+    //
+    // CSS trong bundle (landscape.css) CÓ THỂ không được nạp (file stale /
+    // cache WKWebView / thứ tự nạp động) — đó là lý do các bản trước sửa CSS
+    // mà máy thật không đổi gì. Cách dứt điểm: TIÊM CSS TỪ SWIFT (nằm trong
+    // binary, chạy mỗi lần nạp trang, !important để thắng mọi luật cũ của
+    // style.css / phone.css / landscape.css).
+    //
+    // Tính toán lại lưới (iPhone ngang, ví dụ 14 Pro Max: 932pt):
+    //   • Bỏ padding ngang của .movie-content/.movie-grid; lề an toàn lấy tối
+    //     đa 20px (min(env(...),20px)) thay vì 59px → lấy lại ~80px chiều
+    //     ngang, vẫn né được Dynamic Island.
+    //   • Sidebar danh mục 118px → 100px.
+    //   • 4 thẻ/hàng, flex-grow để dãn kín phần thừa, gap 8px.
+    //   • Poster: 16/9 + object-fit COVER (bản TV dùng `contain` + height cố
+    //     định 165px → mỗi poster bị letterbox = ĐÚNG KHOẢNG TRỐNG ĐEN 2 BÊN
+    //     TRONG THẺ). cover chỉ cắt ảnh, KHÔNG làm méo.
+    //   • Tên phim + năm: nằm DƯỚI ảnh (static), 2 dòng, không che poster.
+    // =====================================================================
+
+    private static let layoutFixJS = """
+    (function () {
+        "use strict";
+        var ID = "bintv-layout-228";
+        function css() {
+            return [
+                ".movie-content {",
+                "  padding: 24px 0 8px !important;",
+                "  padding-left: min(env(safe-area-inset-left, 0px), 20px) !important;",
+                "  padding-right: min(env(safe-area-inset-right, 0px), 20px) !important;",
+                "}",
+                ".movie-grid { padding: 4px 0 18px !important; }",
+                ".movie-status { left: 8px !important; right: 8px !important; }",
+                ".movie-catalogs { flex: 0 0 100px !important; width: 100px !important; }",
+                ".movie-card {",
+                "  flex: 1 1 calc(25% - 8px) !important;",
+                "  max-width: calc(50% - 8px) !important;",
+                "  margin: 0 4px 12px !important;",
+                "  padding: 0 !important;",
+                "}",
+                ".movie-card-poster {",
+                "  width: 100% !important; height: auto !important;",
+                "  aspect-ratio: 16 / 9 !important;",
+                "  object-fit: cover !important;",
+                "  background: #111118 !important;",
+                "}",
+                ".movie-card::after { display: none !important; }",
+                ".movie-card-name {",
+                "  position: static !important; display: -webkit-box !important;",
+                "  -webkit-box-orient: vertical !important; -webkit-line-clamp: 2 !important;",
+                "  height: auto !important; max-height: 2.4em !important;",
+                "  margin: 6px 5px 0 !important; font-size: 15px !important;",
+                "  line-height: 1.2 !important; overflow: hidden !important;",
+                "  text-shadow: none !important;",
+                "}",
+                ".movie-card-meta {",
+                "  position: static !important; height: auto !important;",
+                "  margin: 3px 5px 2px !important; font-size: 13px !important;",
+                "  white-space: nowrap !important; overflow: hidden !important;",
+                "  text-overflow: ellipsis !important; text-shadow: none !important;",
+                "}",
+                ".movie-skeleton-name { position: static !important; display: block !important;",
+                "  height: 14px !important; margin: 6px 5px 0 !important; width: 70% !important; }",
+                ".movie-skeleton-meta { position: static !important; display: block !important;",
+                "  height: 11px !important; margin: 4px 5px 2px !important; width: 45% !important; }",
+                ".movie-subtitle-text { bottom: 104px !important; }"
+            ].join("\n");
+        }
+        function inject() {
+            try {
+                if (document.getElementById(ID)) { return true; }
+                var style = document.createElement("style");
+                style.id = ID;
+                style.type = "text/css";
+                style.appendChild(document.createTextNode(css()));
+                (document.head || document.documentElement).appendChild(style);
+                return true;
+            } catch (e) { return false; }
+        }
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", inject, { once: true });
+        } else { inject(); }
+    })();
+    """
+
+    // =====================================================================
     // [FIX 2026-09-13 build 225 — PHIM KHÔNG TOÀN MÀN HÌNH / CÓ VIỀN ĐEN
     //  2 BÊN]
     //
@@ -722,15 +812,23 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     /// Process bị kết thúc TRONG LÚC app ở nền → hoãn phục hồi tới foreground.
     private var pendingRestoreAfterBackground = false
 
-    /// Watchdog: nếu không CHỨNG MINH được webview còn sống & đang vẽ trong
-    /// thời gian này thì coi như đã chết (màn hình đen) → nạp lại trang.
+    /// Watchdog: sau khi nạp lại, kiểm tra webview có THẬT SỰ vẽ không.
     private var recoveryWatchdog: DispatchWorkItem?
-    /// Đã kết luận (sống hoặc đã nạp lại) cho lượt phục hồi hiện tại.
+    /// Đã kết luận (đang vẽ) → không làm gì thêm.
     private var recoverySettled = false
+    /// Đang trong một chu trình phục hồi (tránh chạy chồng: willEnterForeground
+    /// + didBecomeActive + scenePhase đều có thể bắn cùng lúc).
+    private var recoveryInProgress = false
     /// Số lần phục hồi trong một lượt foreground (chống lặp vô hạn).
     private var recoveryAttempts = 0
-    /// Hạn mức cứng của watchdog (giây).
-    private static let recoveryDeadline: TimeInterval = 3
+    /// Tối đa 3 lần: nạp lại → kiểm tra → nạp lại …
+    private static let recoveryAttemptLimit = 3
+    /// Chờ trang nạp xong trước khi kiểm tra có vẽ hay không.
+    private static let paintCheckDelay: TimeInterval = 5
+
+    /// Hộp cờ dùng chung cho các closure (tránh bắt biến var trong closure
+    /// chạy trên nhiều hàng đợi).
+    private final class FlagBox { var value = false }
 
     private func installLifecycleObservers() {
         let center = NotificationCenter.default
@@ -752,40 +850,150 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
     // chết / trang bị kẹt giữa chừng lúc ở nền) thì không có gì xảy ra cả →
     // màn hình đen vĩnh viễn đúng như máy thật. Nay mọi đường đều có hạn mức.
     // ---------------------------------------------------------------------
+    /// [build 228] App vừa trở lại foreground — xử lý THEO ĐÚNG LIFECYCLE:
+    /// không reload mù quáng. Quy trình: ép vẽ → **ĐO** trạng thái render
+    /// thật của trang → chỉ can thiệp khi có bằng chứng (lưới trống / browser
+    /// bị ẩn / webview không phản hồi), theo thứ tự từ nhẹ đến nặng:
+    ///   1. gỡ class `player-active` (browser đang bị ẩn → nhìn như màn đen);
+    ///   2. làm mới dữ liệu bằng CHÍNH luồng của web app (chọn lại danh mục)
+    ///      — giữ nguyên mọi trạng thái, không reload;
+    ///   3. nạp lại trang (bỏ cache) + kiểm tra server nội bộ;
+    ///   4. bỏ cuộc → hiện overlay "Thử lại" thay vì để người dùng nhìn đen.
     private func handleAppDidReturnFromBackground() {
-        guard started else { return }   // tab PHIM chưa từng mở → không làm gì
-        if recoveryWatchdog != nil { return }   // đang phục hồi rồi
-        ensureServerAlive()
-        if pendingRestoreAfterBackground {
-            pendingRestoreAfterBackground = false
-            reloadPage(reason: "WebContent process bị kết thúc khi app ở nền")
-            return
+        guard started else { return }          // tab PHIM chưa từng mở → thôi
+        guard !recoveryInProgress else { return }
+        recoveryInProgress = true
+        recoveryAttempts = 0
+        // Khoá an toàn: luôn mở lại chu trình sau 40s (tránh kẹt).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
+            self?.recoveryInProgress = false
         }
-        beginForegroundRecovery()
+        // Bước 0: ép vẽ lại (rẻ, không mất trạng thái) rồi mới đo.
+        repaintWebView()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.assessAndRecover()
+        }
     }
+
+    /// ĐỌC trạng thái render thật: số thẻ trong lưới · browser có bị ẩn
+    /// (`player-active`) · browser có đang show · bề rộng lưới · dòng trạng
+    /// thái. Đây là "bằng chứng" để quyết định bước xử lý tiếp theo.
+    private func assessAndRecover() {
+        let js = """
+        (function(){
+          try{
+            var grid=document.getElementById('bintv-movie-grid');
+            var cards=grid?grid.querySelectorAll('.movie-card').length:-1;
+            var browser=document.getElementById('bintv-movie-browser');
+            var shown=!!(browser&&browser.classList.contains('show'));
+            var hidden=!!(browser&&browser.classList.contains('player-active'));
+            var st=document.getElementById('bintv-movie-status');
+            var status=(st&&st.textContent||'').slice(0,60);
+            var w=grid?Math.round(grid.getBoundingClientRect().width):-1;
+            return String(cards)+'|'+(shown?1:0)+'|'+(hidden?1:0)+'|'+String(w)+'|'+status;
+          }catch(e){return 'ERR';}
+        })()
+        """
+        let answered = FlagBox()
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self = self else { return }
+            answered.value = true
+            let text = (result as? String) ?? ""
+            let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            let cards = Int(parts.count > 0 ? parts[0] : "-1") ?? -1
+            let shown = parts.count > 1 ? parts[1] == "1" : false
+            let hidden = parts.count > 2 ? parts[2] == "1" : false
+            let width = Int(parts.count > 3 ? parts[3] : "-1") ?? -1
+            let status = parts.count > 4 ? parts[4] : ""
+            PhimDebugLog.step("WEBVIEW", "assess", "ok",
+                               "cards=\(cards) shown=\(shown) hidden=\(hidden) gridW=\(width) status=\(status)")
+            if error != nil || text == "ERR" || cards < 0 {
+                // Không đọc được trang = webview đã chết → nạp lại.
+                self.reloadPage(reason: "không đọc được trạng thái trang (cards=\(cards))")
+                return
+            }
+            if hidden {
+                // (1) Browser đang bị ẨN bởi class player-active → gỡ lớp này
+                // (đúng nguyên nhân, không cần nạp lại).
+                self.webView.evaluateJavaScript(
+                    "document.getElementById('bintv-movie-browser').classList.remove('player-active'); 'ok'"
+                ) { _, _ in }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                    self?.reassessAfterFix()
+                }
+                return
+            }
+            if cards == 0 || !shown {
+                // (2) LƯỚI TRỐNG / browser chưa show → đúng triệu chứng
+                // "màn hình đen": làm mới bằng chính luồng của web app.
+                self.softRefresh()
+                return
+            }
+            // Có nội dung: chỉ cần chắc chắn nó đang được vẽ.
+            self.verifyPainting()
+        }
+        // Webview chết thì evaluateJavaScript KHÔNG BAO GIỜ gọi về → hạn mức.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self, !answered.value else { return }
+            self.reloadPage(reason: "webview không phản hồi khi đo trạng thái render")
+        }
+    }
+
+    /// (2) Làm mới DỮ LIỆU bằng chính luồng của web app: bấm lại danh mục
+    /// đang chọn → app.js render lại lưới. KHÔNG reload, KHÔNG mất trạng thái.
+    private func softRefresh() {
+        let js = """
+        (function(){
+          try{
+            var row=document.querySelector('.movie-catalog-row.selected');
+            if(row){ row.click(); return 'selected'; }
+            var rows=document.querySelectorAll('.movie-catalog-row');
+            if(rows.length){ rows[0].click(); return 'first'; }
+            var btn=document.querySelector(".movie-filter-button[data-movie-filter='all']");
+            if(btn){ btn.click(); return 'all'; }
+            return 'no-target';
+          }catch(e){return 'ERR';}
+        })()
+        """
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            guard let self = self else { return }
+            PhimDebugLog.step("WEBVIEW", "softRefresh", "ok", (result as? String) ?? "?")
+            // Chờ web app tải & render lại, rồi ĐO LẠI.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.reassessAfterFix()
+            }
+        }
+    }
+
+    /// Đo lại SAU khi đã xử lý (gỡ player-active / làm mới danh mục):
+    /// có thẻ phim → xong (không reload); vẫn trống → nạp lại trang.
+    private func reassessAfterFix() {
+        webView.evaluateJavaScript(
+            "String(document.querySelectorAll('#bintv-movie-grid .movie-card').length)"
+        ) { [weak self] value, _ in
+            guard let self = self else { return }
+            let cards = Int((value as? String) ?? "-1") ?? -1
+            if cards > 0 {
+                PhimDebugLog.step("WEBVIEW", "reassess", "ok", "đã render lại \(cards) thẻ — không cần nạp lại")
+                self.repaintWebView()
+                self.settleRecovery()
+            } else {
+                self.reloadPage(reason: "lưới vẫn trống sau khi làm mới (cards=\(cards))")
+            }
+        }
+    }
+
+
+
 
     /// Bắt đầu một lượt kiểm tra có HẠN MỨC: watchdog 3s + thăm dò DOM +
     /// kiểm tra có thật sự vẽ khung hình hay không (requestAnimationFrame).
-    private func beginForegroundRecovery() {
-        recoverySettled = false
-        recoveryAttempts = 0
-        recoveryWatchdog?.cancel()
-        let watchdog = DispatchWorkItem { [weak self] in
-            guard let self = self, !self.recoverySettled else { return }
-            self.recoverySettled = true
-            self.reloadPage(reason: "không chứng minh được webview còn sống/vẽ trong "
-                            + "\(Self.recoveryDeadline)s sau khi ở nền")
-        }
-        recoveryWatchdog = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.recoveryDeadline,
-                                      execute: watchdog)
-        repaintWebView()
-        probeAndRestoreIfBlank()
-    }
+
 
     /// Webview đã được chứng minh là sống & đang vẽ → huỷ watchdog.
     private func settleRecovery() {
         recoverySettled = true
+        recoveryInProgress = false
         recoveryWatchdog?.cancel()
         recoveryWatchdog = nil
     }
@@ -822,29 +1030,7 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
 
     /// Hỏi thăm DOM: nếu webview trống/không phản hồi → nạp lại; nếu còn nội
     /// dung → kiểm tra tiếp xem có THẬT SỰ vẽ hay không.
-    private func probeAndRestoreIfBlank() {
-        // Hỏi DOM: readyState | số node con của body | href hiện tại.
-        // Trả "ERR" nếu JS lỗi; mọi trường hợp khác cho biết webview còn sống.
-        let probe = "(function(){try{return String(document.readyState||'')+'|'+String((document.body&&document.body.childElementCount)||0)+'|'+String(window.location.href||'')}catch(e){return 'ERR'}})()"
-        webView.evaluateJavaScript(probe) { [weak self] result, error in
-            guard let self = self else { return }
-            guard !self.recoverySettled else { return }
-            let text = (result as? String) ?? ""
-            let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            let readyState = parts.count > 0 ? parts[0] : ""
-            let children = Int(parts.count > 1 ? parts[1] : "0") ?? 0
-            let href = parts.count > 2 ? parts[2] : ""
-            let blank = (error != nil) || text == "ERR" || children == 0
-                        || href.isEmpty || readyState == "uninitialized"
-            if blank {
-                self.reloadPage(reason: "webview trống/không phản hồi sau khi ở nền (readyState=\(readyState), children=\(children))")
-            } else {
-                // Còn nội dung — NHƯNG có thể vẫn đang hiển thị ĐEN (webview
-                // sống mà không vẽ). Phải kiểm tra thêm bằng rAF.
-                self.verifyPainting()
-            }
-        }
-    }
+
 
     /// Chứng minh webview THẬT SỰ đang vẽ: đếm khung hình bằng
     /// `requestAnimationFrame` — rAF CHỈ chạy khi WebKit còn render, nên
@@ -884,23 +1070,76 @@ final class PhimController: NSObject, ObservableObject, WKScriptMessageHandler, 
 
     /// Nạp lại TRANG (không reload bừa): webview mất cả URL → load lại từ
     /// server; còn URL → reload (giữ localStorage, khôi phục nhanh).
+    /// Nạp lại TRANG — BỎ QUA CACHE, có kiểm tra server và leo thang.
     private func reloadPage(reason: String) {
-        recoverySettled = true
-        recoveryWatchdog?.cancel()
-        recoveryWatchdog = nil
-        guard recoveryAttempts < 2 else {
-            PhimDebugLog.step("WEBVIEW", "foregroundRestore", "STOP",
-                               "đã thử \(recoveryAttempts) lần — dừng, tránh lặp vô hạn")
+        guard recoveryAttempts < Self.recoveryAttemptLimit else {
+            // Hết cách tự cứu: hiện overlay lỗi + nút "Thử lại" thay vì để
+            // người dùng nhìn mãi màn hình đen.
+            recoveryWatchdog?.cancel()
+            recoveryWatchdog = nil
+            recoveryInProgress = false
+            PhimDebugLog.step("WEBVIEW", "foregroundRestore", "GIVEUP",
+                               "đã thử \(recoveryAttempts) lần — hiện nút Thử lại")
+            failMessage = "Không tự khôi phục được trang Phim sau khi ứng dụng ở nền."
+            loadFailed = true
             return
         }
         recoveryAttempts += 1
+        recoveryWatchdog?.cancel()
         PhimDebugLog.step("WEBVIEW", "foregroundRestore", "RELOAD", reason)
-        if webView.url == nil {
-            loadPage()
-        } else {
-            webView.reload()
+        // (1) Server nội bộ còn phục vụ không? (socket có thể bị đóng lúc ở nền)
+        checkServerHealth { [weak self] healthy in
+            guard let self = self else { return }
+            if healthy {
+                self.hardLoad()
+            } else {
+                // (2) Server im lặng → nối lại listener rồi nạp lại.
+                PhimDebugLog.step("SERVER", "health", "FAIL", "server nội bộ không phản hồi → nối lại listener")
+                PhimLocalServer.shared.relaunchListenerIfDead()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.hardLoad()
+                }
+            }
         }
     }
+
+    /// Nạp lại THẬT SỰ: yêu cầu **bỏ qua toàn bộ cache** — index.html/CSS/JS
+    /// cũ đang bị cache cũng là một nguyên nhân khiến giao diện không đổi.
+    private func hardLoad() {
+        guard let url = pageURL() else { ensureServerAlive(); return }
+        var request = URLRequest(url: url,
+                                 cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+                                 timeoutInterval: 30)
+        webView.load(request)
+        // Sau khi trang kịp nạp (5s) → ĐO LẠI TRẠNG THÁI RENDER
+        // (có thẻ phim? browser có bị ẩn?) — không chỉ đếm khung hình.
+        let watchdog = DispatchWorkItem { [weak self] in
+            self?.assessAndRecover()
+        }
+        recoveryWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintCheckDelay,
+                                      execute: watchdog)
+    }
+
+    /// Hỏi `/health` của server nội bộ (nhanh, 1.2s) — quyết định có cần nối
+    /// lại listener trước khi nạp lại trang hay không.
+    private func checkServerHealth(completion: @escaping (Bool) -> Void) {
+        let server = PhimLocalServer.shared
+        self.server = server
+        guard server.port > 0,
+              let url = URL(string: "http://127.0.0.1:\(server.port)/health") else {
+            completion(false)
+            return
+        }
+        var request = URLRequest(url: url,
+                                 cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+                                 timeoutInterval: 1.2)
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            let ok = (error == nil) && ((response as? HTTPURLResponse)?.statusCode == 200)
+            DispatchQueue.main.async { completion(ok) }
+        }.resume()
+    }
+
 
     // =====================================================================
     // Audio session (âm thanh phim — độc lập với tab TUBE)

@@ -51,8 +51,8 @@
 
 /* ---------- Sidebar danh mục: hẹp nhất có thể đọc ---------- */
 .movie-catalogs {
-    flex: 0 0 118px;
-    width: 118px;
+    flex: 0 0 100px;
+    width: 100px;
     padding: 8px 6px;
 }
 .movie-catalog-row {
@@ -75,8 +75,9 @@
    (8px) của vùng nội dung — thẻ phim chạm sát mép trái/phải màn hình, chỉ
    chừa env(safe-area-inset-*) để né góc Dynamic Island. ---------- */
 .movie-content {
-    padding: 28px env(safe-area-inset-right, 0px)
-             8px env(safe-area-inset-left, 0px);
+    padding: 24px 0 8px;
+    padding-left: min(env(safe-area-inset-left, 0px), 20px);
+    padding-right: min(env(safe-area-inset-right, 0px), 20px);
 }
 .movie-status { left: 10px; right: 10px; top: 6px; font-size: 12px; }
 
@@ -96,14 +97,19 @@
        hàng (hết hẳn khoảng trống đen 2 bên, kể cả hàng cuối); max-width giữ
        một thẻ không bao giờ phình quá nửa hàng (tránh thẻ khổng lồ khi hàng
        cuối chỉ còn 1 phim). Poster vẫn 16/9 → KHÔNG méo, KHÔNG crop. */
-    flex: 1 1 calc(25% - 10px);
-    max-width: calc(50% - 10px);
-    margin: 0 5px 14px;
+    flex: 1 1 calc(25% - 8px);
+    max-width: calc(50% - 8px);
+    margin: 0 4px 12px;
+    padding: 0;
     border-width: 2px;
     border-radius: 9px;
 }
 .movie-card-poster {
     aspect-ratio: 16 / 9;
+    /* cover: lấp kín thẻ (bản TV dùng contain + height 165px → poster bị
+       letterbox, chính là khoảng trống đen 2 bên trong mỗi thẻ). */
+    object-fit: cover;
+    background: #111118;
     border-radius: 7px;
 }
 /* Không còn chữ phủ lên ảnh → không cần gradient làm nền chữ. */

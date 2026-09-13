@@ -577,6 +577,29 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
         proxySession.invalidateAndCancel()
     }
 
+    /// [build 227] NỐI LẠI socket nghe khi health check thất bại (socket có
+    /// thể bị hệ thống đóng khi app ở nền → mọi lần nạp lại sau đó đều đen).
+    ///
+    /// Chỉ đụng listener + các cờ; **KHÔNG** đụng `proxySession` (đang phục vụ
+    /// stream — `invalidateAndCancel()` trên lazy var là mất vĩnh viễn) và
+    /// KHÔNG gọi `stop()`. Nếu listener còn sống → không làm gì.
+    func relaunchListenerIfDead() {
+        serverQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard !self.listenActive else {
+                PhimDebugLog.step("SERVER", "relaunchListener", "skip", "listener còn sống")
+                return
+            }
+            if self.listenFd >= 0 {
+                close(self.listenFd)
+                self.listenFd = -1
+            }
+            PhimDebugLog.step("SERVER", "relaunchListener", "begin",
+                              "listener đã chết — bind lại (port cũ=\(self.port))")
+            self.startListenerBsd()
+        }
+    }
+
     deinit {
         stop()
     }
@@ -711,6 +734,42 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
         Bundle.main.url(forResource: "Web", withExtension: nil)
     }
 
+    /// Viewport CHUẨN cho iPhone (app BinTV chạy chế độ TV ngang).
+    /// - `width=device-width`: layout theo đúng bề rộng thiết bị (932pt trên
+    ///   14 Pro Max ngang) → nội dung phủ kín, KHÔNG còn viền đen 2 bên.
+    /// - `viewport-fit=cover`: phủ cả vùng Dynamic Island (dùng kèm
+    ///   `env(safe-area-inset-*)` trong CSS để né).
+    /// - `maximum-scale=1 / user-scalable=no`: webview không tự phóng/thu.
+    private static let iOSViewport =
+        "width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+
+    /// Thay (hoặc chèn) thẻ `<meta name="viewport">` trong HTML bằng viewport
+    /// chuẩn iPhone. Chạy TRÊN SERVER khi trả index.html → chắc chắn 100%,
+    /// không phụ thuộc thứ tự script hay cache của WKWebView.
+    private static func applyIOSViewport(_ html: String) -> String {
+        let replacement = "<meta name=\"viewport\" content=\"\(iOSViewport)\">"
+        // Tìm thẻ meta viewport hiện có (mọi biến thể thứ tự thuộc tính/khoảng trắng).
+        if let regex = try? NSRegularExpression(
+            pattern: "<meta\\s+[^>]*name\\s*=\\s*[\"']viewport[\"'][^>]*>",
+            options: [.caseInsensitive]) {
+            let range = NSRange(html.startIndex..., in: html)
+            if let match = regex.firstMatch(in: html, options: [], range: range),
+               let swiftRange = Range(match.range, in: html) {
+                let out = html.replacingCharacters(in: swiftRange, with: replacement)
+                PhimDebugLog.step("STATIC", "viewport", "ok", "đã thay meta viewport 1920 → device-width")
+                return out
+            }
+        }
+        // Không có sẵn thẻ → chèn ngay sau <head>.
+        if let headRange = html.range(of: "<head>", options: .caseInsensitive) {
+            var out = html
+            out.insert(contentsOf: replacement, at: headRange.upperBound)
+            PhimDebugLog.step("STATIC", "viewport", "ok", "đã chèn meta viewport device-width")
+            return out
+        }
+        return html
+    }
+
     private func serveStatic(_ connection: FdConnection, path: String) {
         var assetPath: String
         if path == "/" || path.isEmpty {
@@ -732,7 +791,20 @@ final class PhimLocalServer: NSObject, URLSessionTaskDelegate {
             return
         }
         let fileURL = root.appendingPathComponent(assetPath)
-        guard let data = try? Data(contentsOf: fileURL), data.count <= 15_000_000 else {
+        var data = try? Data(contentsOf: fileURL)
+        // [build 228 — ROOT CAUSE "PHIM không toàn màn hình / còn viền đen 2 bên"]
+        // index.html của web app khai báo viewport 1920x1080 (bố cục TV
+        // Electron/Android TV). Sửa bằng script trong <head> KHÔNG đủ (WebKit
+        // đã chốt layout theo 1920 trước khi script chạy) → trang bị thu nhỏ
+        // vừa màn hình iPhone (932x430 → nội dung ~764 rộng) và lộ ~84px đen
+        // mỗi bên. Cách dứt điểm: VIẾT LẠI meta viewport NGAY TRONG HTML mà
+        // server trả về — không phụ thuộc JS, không phụ thuộc cache.
+        if assetPath == "index.html", let raw = data,
+           let html = String(data: raw, encoding: .utf8) {
+            let patched = Self.applyIOSViewport(html)
+            data = Data(patched.utf8)
+        }
+        guard var data = data, data.count <= 15_000_000 else {
             PhimDebugLog.step("STATIC", "serve", "404", assetPath)
             sendJsonError(connection, code: 404, message: "Not found: \(path)")
             return
